@@ -145,31 +145,40 @@ public sealed class LocalFolderSource :
 
     // ── IBrowsable ─────────────────────────────────────────────────────────────
 
+    // Sentinel id for this instance's single root node (the whole merged catalog).
+    private const string RootCategoryId = "__all__";
+
     public async IAsyncEnumerable<SourceCategory> GetRootCategoriesAsync(
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         await Task.CompletedTask;
-        // One tile per configured folder.
-        foreach (var folder in _folders.Where(Directory.Exists))
+        // A single tile representing this instance (its folders are an implementation detail, just
+        // like a Plex library is composed of folders behind the scenes). A user who wants separate
+        // tiles adds another instance of the plug-in. The tile is named after the instance.
+        if (_folders.Any(Directory.Exists))
         {
             yield return new SourceCategory
             {
                 SourceInstanceId = InstanceId,
-                CategoryId = folder,
-                Title = Path.GetFileName(folder.TrimEnd(Path.DirectorySeparatorChar)) is { Length: > 0 } n ? n : folder,
+                CategoryId = RootCategoryId,
+                Title = DisplayName,
                 HasSubCategories = false,
-                SourceState = folder,
+                SourceState = RootCategoryId,
             };
         }
     }
 
     public Task<BrowseResult> BrowseAsync(SourceCategory category, CancellationToken ct = default)
     {
-        var folder = category.SourceState as string ?? category.CategoryId;
-        var items = EnsureCatalog()
-            .Where(e => PathIsUnder(e.Path, folder))
-            .Select(ToSourceItem)
-            .ToList();
+        var node = category.SourceState as string ?? category.CategoryId;
+
+        // The root node returns the whole merged catalog across all configured folders; any other
+        // node scopes to that folder's subtree (kept for possible future folder sub-tiles).
+        var entries = node == RootCategoryId
+            ? EnsureCatalog()
+            : EnsureCatalog().Where(e => PathIsUnder(e.Path, node));
+
+        var items = entries.Select(ToSourceItem).ToList();
         return Task.FromResult(new BrowseResult { Items = items });
     }
 
