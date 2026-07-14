@@ -30,8 +30,11 @@ public sealed class LocalFolderSourceProvider : IPhosphorSourceProvider
 
     public IReadOnlyList<PluginSettingDescriptor> GetSettingsSchema() =>
     [
-        new(KeyFolders, "Folders", PluginSettingType.Text,
-            HelpText: "One folder path per line. Media files in these folders become playable."),
+        new(KeyFolders, "Folders", PluginSettingType.FolderPath,
+            HelpText: "Folders to scan for media. Add one or more; files in them become playable.")
+        {
+            AllowMultiple = true,
+        },
         new(KeyRecursive, "Include subfolders", PluginSettingType.Bool, DefaultValue: "true",
             HelpText: "Also scan folders nested inside the ones above."),
     ];
