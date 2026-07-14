@@ -171,16 +171,47 @@ public sealed class LocalFolderSource :
     public Task<BrowseResult> BrowseAsync(SourceCategory category, CancellationToken ct = default)
     {
         var node = category.SourceState as string ?? category.CategoryId;
+        var catalog = EnsureCatalog();
 
-        // The root node returns the whole merged catalog across all configured folders; any other
-        // node scopes to that folder's subtree (kept for possible future folder sub-tiles).
-        var entries = node == RootCategoryId
-            ? EnsureCatalog()
-            : EnsureCatalog().Where(e => PathIsUnder(e.Path, node));
+        if (node == RootCategoryId)
+        {
+            var existingFolders = _folders.Where(Directory.Exists).ToList();
 
-        var items = entries.Select(ToSourceItem).ToList();
+            // With multiple folders, expose each as a drill-in sub-category so the user can browse
+            // per-folder (instance → folder → files). With a single folder, stay flat (merged list).
+            if (existingFolders.Count > 1)
+            {
+                var categories = existingFolders
+                    .Select(f => new SourceCategory
+                    {
+                        SourceInstanceId = InstanceId,
+                        CategoryId = f,
+                        Title = FolderLabel(f),
+                        HasSubCategories = false,
+                        SourceState = f,
+                    })
+                    .ToList();
+
+                // Any media directly in a configured folder's root still shows at the top level too.
+                var looseItems = catalog
+                    .Where(e => existingFolders.Contains(e.Folder))
+                    .Select(ToSourceItem)
+                    .ToList();
+
+                return Task.FromResult(new BrowseResult { Categories = categories, Items = looseItems });
+            }
+
+            // Single folder (or none): flat merged catalog.
+            return Task.FromResult(new BrowseResult { Items = catalog.Select(ToSourceItem).ToList() });
+        }
+
+        // A specific folder node: its files (recursively, if enabled).
+        var items = catalog.Where(e => PathIsUnder(e.Path, node)).Select(ToSourceItem).ToList();
         return Task.FromResult(new BrowseResult { Items = items });
     }
+
+    private static string FolderLabel(string folder)
+        => Path.GetFileName(folder.TrimEnd(Path.DirectorySeparatorChar)) is { Length: > 0 } n ? n : folder;
 
     // ── ITextSearchCapable ─────────────────────────────────────────────────────
 
