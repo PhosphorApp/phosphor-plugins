@@ -36,7 +36,7 @@ public sealed class LocalFolderSource :
 
     // On-disk cache format version. Bump when the persisted shape changes; a mismatch forces a
     // full rescan (the tester-only user base does not need migration shims).
-    private const int CacheSchemaVersion = 3;
+    private const int CacheSchemaVersion = 4;
     private const string CacheFileName = "catalog.json";
 
     public LocalFolderSource(string instanceId, IReadOnlyDictionary<string, string?> settings)
@@ -163,9 +163,11 @@ public sealed class LocalFolderSource :
                         prior.FileSize == size && prior.LastWriteTimeUtc == writeUtc)
                     {
                         var reusedEntry = prior with { Folder = folder };
-                        // The file is unchanged, but the thumbnail may be missing (e.g. the setting was
-                        // just enabled, or the cached image was deleted). Generate it on demand.
-                        if (_extractThumbnails)
+                        // The file is unchanged. Only (re)generate a thumbnail if we've never tried
+                        // for this file (e.g. the setting was just enabled) or a previously-made image
+                        // went missing. A file we already tried and that has no cover art / no ffmpeg
+                        // frame is skipped, so it doesn't pay the extraction cost on every rescan.
+                        if (_extractThumbnails && NeedsThumbnail(reusedEntry))
                             reusedEntry = EnsureThumbnail(reusedEntry, ct);
                         catalog.Add(reusedEntry);
                         reused++;
@@ -232,6 +234,21 @@ public sealed class LocalFolderSource :
         lock (_gate) return _catalog;
     }
 
+    /// <summary>
+    /// Async counterpart of <see cref="EnsureCatalog"/>. Loading the cache and (if needed) building it
+    /// can touch disk and read tags for a large library, so it runs off the caller's thread. The host
+    /// awaits browse/search on the UI thread, so doing this work inline would hang the UI; offloading
+    /// it keeps the await truly asynchronous.
+    /// </summary>
+    private async Task<List<MediaEntry>> EnsureCatalogAsync(CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            if (_catalogBuilt) return _catalog;
+        }
+        return await Task.Run(() => EnsureCatalog(), ct);
+    }
+
     // ── metadata (tags) ─────────────────────────────────────────────────────────
 
     /// <summary>
@@ -281,10 +298,24 @@ public sealed class LocalFolderSource :
         _host is { InstanceCacheDirectory: { Length: > 0 } dir } ? Path.Combine(dir, ThumbsDirName) : null;
 
     /// <summary>
+    /// True when a thumbnail should be (re)generated for an otherwise-unchanged, reused entry: either
+    /// we've never attempted extraction for it, or a previously-created image is no longer on disk.
+    /// Files we've already tried that yielded no image (no cover art / no ffmpeg) return false so they
+    /// aren't reprocessed every rescan.
+    /// </summary>
+    private static bool NeedsThumbnail(MediaEntry entry)
+    {
+        if (!entry.ThumbnailTried) return true;
+        return entry.ThumbnailPath is { Length: > 0 } p && !File.Exists(p);
+    }
+
+    /// <summary>
     /// Ensures a cached thumbnail exists for the entry and returns it with <see cref="MediaEntry.ThumbnailPath"/>
     /// set. Audio uses embedded cover art (TagLibSharp); video shells out to the host's ffmpeg for a
     /// single frame. All failure modes are non-fatal — the entry is returned unchanged so the catalog
     /// still builds. A stable hash of the path keys the file so unchanged files reuse the same thumb.
+    /// The returned entry always has <see cref="MediaEntry.ThumbnailTried"/> set, so a file that has no
+    /// artwork is not re-extracted on subsequent rescans.
     /// </summary>
     private MediaEntry EnsureThumbnail(MediaEntry entry, CancellationToken ct)
     {
@@ -293,8 +324,10 @@ public sealed class LocalFolderSource :
 
         // Reuse an already-generated thumbnail if it's still on disk.
         if (entry.ThumbnailPath is { Length: > 0 } existing && File.Exists(existing))
-            return entry;
+            return entry with { ThumbnailTried = true };
 
+        // Mark the attempt up front so every return path (success or failure) records that we tried.
+        entry = entry with { ThumbnailTried = true };
         try
         {
             Directory.CreateDirectory(dir);
@@ -472,22 +505,31 @@ public sealed class LocalFolderSource :
 
         // A single tile for the instance. Drilling in shows the "Folders"/"By Artist" view sub-tiles
         // when both are enabled, or opens directly into the one enabled view otherwise.
-        var catalog = EnsureCatalog();
+        // NOTE: do NOT build/scan the catalog here — the host enumerates root tiles during startup,
+        // and a synchronous rescan (e.g. after a cache-schema bump) would block the splash. Use a
+        // thumbnail only if the catalog is already in memory; otherwise the tile is fine without one.
         yield return new SourceCategory
         {
             SourceInstanceId = InstanceId,
             CategoryId = RootId,
             Title = DisplayName,
-            ThumbnailUrl = FirstThumbnail(catalog),
+            ThumbnailUrl = TryGetLoadedThumbnail(),
             HasSubCategories = true,
             SourceState = RootId,
         };
     }
 
-    public Task<BrowseResult> BrowseAsync(SourceCategory category, CancellationToken ct = default)
+    /// <summary>A representative thumbnail if the catalog is already loaded, else null. Never builds.</summary>
+    private string? TryGetLoadedThumbnail()
+    {
+        lock (_gate)
+            return _catalogBuilt ? FirstThumbnail(_catalog) : null;
+    }
+
+    public async Task<BrowseResult> BrowseAsync(SourceCategory category, CancellationToken ct = default)
     {
         var node = category.SourceState as string ?? category.CategoryId;
-        var catalog = EnsureCatalog();
+        var catalog = await EnsureCatalogAsync(ct);
 
         // Root tile: with both views enabled, offer the two view sub-tiles; with one view pinned,
         // pass straight through to that view so there's no redundant middle tile.
@@ -518,7 +560,7 @@ public sealed class LocalFolderSource :
                         SourceState = MetadataRootId,
                     },
                 };
-                return Task.FromResult(new BrowseResult { Categories = views });
+                return new BrowseResult { Categories = views };
             }
 
             node = ShowMetadataView ? MetadataRootId : FolderRootId;
@@ -528,7 +570,7 @@ public sealed class LocalFolderSource :
         if (node == MetadataRootId
             || node.StartsWith(ArtistPrefix, StringComparison.Ordinal)
             || node.StartsWith(AlbumPrefix, StringComparison.Ordinal))
-            return Task.FromResult(BrowseByMetadata(node, catalog));
+            return BrowseByMetadata(node, catalog);
 
         // Folder tree — a file-explorer style drill-down: each level shows its immediate subfolders
         // and immediate files, one level at a time.
@@ -539,7 +581,7 @@ public sealed class LocalFolderSource :
             // A single configured folder is the natural root — browse straight into it. With several
             // configured folders, list each as a top-level node (then drill into its own tree).
             if (existingFolders.Count == 1)
-                return Task.FromResult(BrowseFolder(existingFolders[0], catalog));
+                return BrowseFolder(existingFolders[0], catalog);
 
             var roots = existingFolders
                 .Select(f => new SourceCategory
@@ -552,11 +594,11 @@ public sealed class LocalFolderSource :
                     SourceState = f,
                 })
                 .ToList();
-            return Task.FromResult(new BrowseResult { Categories = roots });
+            return new BrowseResult { Categories = roots };
         }
 
         // Any other node in the folder view is a directory path — show its immediate contents.
-        return Task.FromResult(BrowseFolder(node, catalog));
+        return BrowseFolder(node, catalog);
     }
 
     /// <summary>
@@ -709,8 +751,7 @@ public sealed class LocalFolderSource :
     public async IAsyncEnumerable<SourceItem> SearchAsync(
         string query, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
-        await Task.CompletedTask;
-        var catalog = EnsureCatalog();
+        var catalog = await EnsureCatalogAsync(ct);
         foreach (var e in catalog)
         {
             ct.ThrowIfCancellationRequested();
@@ -814,5 +855,6 @@ public sealed class LocalFolderSource :
         uint Year = 0,
         TimeSpan? Duration = null,
         bool MetadataRead = false,
-        string? ThumbnailPath = null);
+        string? ThumbnailPath = null,
+        bool ThumbnailTried = false);
 }
