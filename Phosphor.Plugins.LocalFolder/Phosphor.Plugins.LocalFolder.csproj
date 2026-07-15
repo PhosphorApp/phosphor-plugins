@@ -21,6 +21,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!--
+      TagLibSharp reads embedded tags (artist/album/track/duration/year) from media files during
+      a rescan. A clean third-party NuGet dependency, part of what makes this a realistic template.
+    -->
+    <PackageReference Include="TagLibSharp" Version="2.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
 	<!--
 	  Compile-only reference to the contract: the host owns the single runtime copy so contract
 	  types unify across the load boundary (Private=false / ExcludeAssets=runtime).

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Phosphor.Plugin.Abstractions;
 
 namespace Phosphor.Plugins.LocalFolder;
@@ -24,10 +25,19 @@ public sealed class LocalFolderSource :
     private readonly object _gate = new();
     private List<MediaEntry> _catalog = [];
     private bool _catalogBuilt;
+    private DateTimeOffset? _catalogSavedUtc;
 
     private IPluginHost? _host;
     private List<string> _folders = [];
     private bool _recursive = true;
+    private int _cacheMaxAgeHours;
+    private string _organizeBy = LocalFolderSourceProvider.OrganizeByFolder;
+    private bool _extractThumbnails;
+
+    // On-disk cache format version. Bump when the persisted shape changes; a mismatch forces a
+    // full rescan (the tester-only user base does not need migration shims).
+    private const int CacheSchemaVersion = 3;
+    private const string CacheFileName = "catalog.json";
 
     public LocalFolderSource(string instanceId, IReadOnlyDictionary<string, string?> settings)
     {
@@ -58,14 +68,26 @@ public sealed class LocalFolderSource :
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToList();
         _recursive = !bool.TryParse(Get(values, LocalFolderSourceProvider.KeyRecursive), out var r) || r;
+        _cacheMaxAgeHours = int.TryParse(Get(values, LocalFolderSourceProvider.KeyCacheMaxAgeHours), out var h) && h > 0
+            ? h : 0;
+        _organizeBy = Get(values, LocalFolderSourceProvider.KeyOrganizeBy) switch
+        {
+            var v when string.Equals(v, LocalFolderSourceProvider.OrganizeByFolder, StringComparison.OrdinalIgnoreCase)
+                => LocalFolderSourceProvider.OrganizeByFolder,
+            var v when string.Equals(v, LocalFolderSourceProvider.OrganizeByMetadata, StringComparison.OrdinalIgnoreCase)
+                => LocalFolderSourceProvider.OrganizeByMetadata,
+            _ => LocalFolderSourceProvider.OrganizeByBoth,
+        };
+        _extractThumbnails = bool.TryParse(Get(values, LocalFolderSourceProvider.KeyExtractThumbnails), out var t) && t;
 
         // Settings changed — the catalog is stale.
         lock (_gate)
         {
             _catalog = [];
             _catalogBuilt = false;
+            _catalogSavedUtc = null;
         }
-        _host?.Log($"LocalFolderSource: {_folders.Count} folder(s), recursive={_recursive}");
+        _host?.Log($"LocalFolderSource: {_folders.Count} folder(s), recursive={_recursive}, cacheMaxAgeHours={_cacheMaxAgeHours}, organizeBy={_organizeBy}, thumbnails={_extractThumbnails}");
     }
 
     // ── IRefreshable ───────────────────────────────────────────────────────────
@@ -81,8 +103,20 @@ public sealed class LocalFolderSource :
             if (existing.Count == 0)
                 return new RefreshResult(false, 0, "No configured folders exist on disk.");
 
+            // Index the previous catalog by path so unchanged files can be reused verbatim — this
+            // keeps rescans cheap and preserves already-extracted metadata and thumbnails for files
+            // whose contents haven't changed on disk. Prefer the in-memory catalog, but fall back to
+            // the on-disk cache: the Settings "Rescan library" runs on a fresh transient source whose
+            // in-memory catalog is empty, so without this every file would be miscounted as "new".
+            List<MediaEntry> priorEntries;
+            lock (_gate)
+                priorEntries = _catalog;
+            if (priorEntries.Count == 0 && TryLoadCache(out var cachedPrior, out _))
+                priorEntries = cachedPrior;
+            var previous = priorEntries.ToDictionary(e => e.Path, StringComparer.OrdinalIgnoreCase);
+
             var catalog = new List<MediaEntry>();
-            int folderIndex = 0;
+            int folderIndex = 0, reused = 0, scanned = 0;
             foreach (var folder in existing)
             {
                 ct.ThrowIfCancellationRequested();
@@ -110,11 +144,45 @@ public sealed class LocalFolderSource :
                     var isAudio = AudioExtensions.Contains(ext);
                     if (!isVideo && !isAudio) continue;
 
-                    catalog.Add(new MediaEntry(
+                    long size;
+                    DateTimeOffset writeUtc;
+                    try
+                    {
+                        var info = new FileInfo(path);
+                        size = info.Length;
+                        writeUtc = info.LastWriteTimeUtc;
+                    }
+                    catch (Exception ex)
+                    {
+                        _host?.Log($"LocalFolderSource: skipping '{path}': {ex.Message}");
+                        continue;
+                    }
+
+                    // Incremental reuse: keep the cached entry when size and last-write time match.
+                    if (previous.TryGetValue(path, out var prior) &&
+                        prior.FileSize == size && prior.LastWriteTimeUtc == writeUtc)
+                    {
+                        var reusedEntry = prior with { Folder = folder };
+                        // The file is unchanged, but the thumbnail may be missing (e.g. the setting was
+                        // just enabled, or the cached image was deleted). Generate it on demand.
+                        if (_extractThumbnails)
+                            reusedEntry = EnsureThumbnail(reusedEntry, ct);
+                        catalog.Add(reusedEntry);
+                        reused++;
+                        continue;
+                    }
+
+                    var entry = ReadMetadata(new MediaEntry(
                         Path: path,
                         Title: Path.GetFileNameWithoutExtension(path),
                         Folder: folder,
-                        IsAudioOnly: isAudio));
+                        IsAudioOnly: isAudio,
+                        FileSize: size,
+                        LastWriteTimeUtc: writeUtc));
+                    if (_extractThumbnails)
+                        entry = EnsureThumbnail(entry, ct);
+                    catalog.Add(entry);
+                    scanned++;
                 }
                 folderIndex++;
             }
@@ -126,9 +194,12 @@ public sealed class LocalFolderSource :
                 _catalogBuilt = true;
             }
 
+            SaveCache(catalog);
+
             progress?.Report(new RefreshProgress(1.0));
             return new RefreshResult(true, catalog.Count,
-                $"Scanned {catalog.Count} file(s) in {existing.Count} folder(s).");
+                $"Scanned {catalog.Count} file(s) in {existing.Count} folder(s) " +
+                $"({scanned} new/changed, {reused} unchanged).");
         }, ct);
     }
 
@@ -138,34 +209,279 @@ public sealed class LocalFolderSource :
         {
             if (_catalogBuilt) return _catalog;
         }
-        // Build synchronously on first access if a rescan hasn't run yet.
+
+        // Try the on-disk cache first so we don't rescan every launch.
+        if (TryLoadCache(out var cached, out var savedUtc))
+        {
+            bool stale = _cacheMaxAgeHours > 0 &&
+                DateTimeOffset.UtcNow - savedUtc > TimeSpan.FromHours(_cacheMaxAgeHours);
+            lock (_gate)
+            {
+                _catalog = cached;
+                _catalogBuilt = true;
+                _catalogSavedUtc = savedUtc;
+            }
+            if (!stale)
+                return cached;
+
+            _host?.Log("LocalFolderSource: catalog cache is stale — rescanning.");
+        }
+
+        // No usable cache (or it's stale): build synchronously on first access.
         RefreshAsync().GetAwaiter().GetResult();
         lock (_gate) return _catalog;
     }
 
+    // ── metadata (tags) ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reads embedded tag metadata (artist/album/track/year/duration) for a freshly discovered or
+    /// changed file. Defensive per-file: a corrupt or unsupported file simply yields an entry with
+    /// <see cref="MediaEntry.MetadataRead"/> set but empty tags, so it is not re-probed on every
+    /// rescan. Unchanged files skip this entirely via the incremental-reuse path.
+    /// </summary>
+    private MediaEntry ReadMetadata(MediaEntry entry)
+    {
+        try
+        {
+            using var file = TagLib.File.Create(entry.Path);
+            var tag = file.Tag;
+            var title = string.IsNullOrWhiteSpace(tag.Title) ? entry.Title : tag.Title.Trim();
+            var artist = FirstNonEmpty(tag.Performers) ?? FirstNonEmpty(tag.AlbumArtists);
+            var album = string.IsNullOrWhiteSpace(tag.Album) ? null : tag.Album.Trim();
+            var duration = file.Properties?.Duration is { Ticks: > 0 } d ? d : (TimeSpan?)null;
+
+            return entry with
+            {
+                Title = title,
+                Artist = artist,
+                Album = album,
+                Track = tag.Track,
+                Year = tag.Year,
+                Duration = duration,
+                MetadataRead = true,
+            };
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"LocalFolderSource: no tags for '{entry.Path}': {ex.Message}");
+            return entry with { MetadataRead = true };
+        }
+    }
+
+    private static string? FirstNonEmpty(string[]? values)
+        => values?.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v))?.Trim();
+
+    // ── thumbnails ──────────────────────────────────────────────────────────────
+
+    private const string ThumbsDirName = "thumbs";
+
+    /// <summary>Per-instance directory where generated thumbnails are cached, or null if unavailable.</summary>
+    private string? ThumbsDirectory =>
+        _host is { InstanceCacheDirectory: { Length: > 0 } dir } ? Path.Combine(dir, ThumbsDirName) : null;
+
+    /// <summary>
+    /// Ensures a cached thumbnail exists for the entry and returns it with <see cref="MediaEntry.ThumbnailPath"/>
+    /// set. Audio uses embedded cover art (TagLibSharp); video shells out to the host's ffmpeg for a
+    /// single frame. All failure modes are non-fatal — the entry is returned unchanged so the catalog
+    /// still builds. A stable hash of the path keys the file so unchanged files reuse the same thumb.
+    /// </summary>
+    private MediaEntry EnsureThumbnail(MediaEntry entry, CancellationToken ct)
+    {
+        var dir = ThumbsDirectory;
+        if (dir is null) return entry;
+
+        // Reuse an already-generated thumbnail if it's still on disk.
+        if (entry.ThumbnailPath is { Length: > 0 } existing && File.Exists(existing))
+            return entry;
+
+        try
+        {
+            Directory.CreateDirectory(dir);
+            var key = StableHash(entry.Path);
+
+            if (entry.IsAudioOnly)
+            {
+                var target = Path.Combine(dir, key + ".jpg");
+                return ExtractCoverArt(entry, target) ? entry with { ThumbnailPath = target } : entry;
+            }
+            else
+            {
+                var target = Path.Combine(dir, key + ".jpg");
+                return ExtractVideoFrame(entry, target, ct) ? entry with { ThumbnailPath = target } : entry;
+            }
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"LocalFolderSource: thumbnail failed for '{entry.Path}': {ex.Message}");
+            return entry;
+        }
+    }
+
+    private bool ExtractCoverArt(MediaEntry entry, string target)
+    {
+        try
+        {
+            using var file = TagLib.File.Create(entry.Path);
+            var pic = file.Tag.Pictures?.FirstOrDefault(p => p.Data?.Data is { Length: > 0 });
+            if (pic?.Data?.Data is not { Length: > 0 } bytes) return false;
+            File.WriteAllBytes(target, bytes);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"LocalFolderSource: no cover art for '{entry.Path}': {ex.Message}");
+            return false;
+        }
+    }
+
+    private bool ExtractVideoFrame(MediaEntry entry, string target, CancellationToken ct)
+    {
+        var ffmpeg = _host?.GetToolPath("ffmpeg");
+        if (string.IsNullOrEmpty(ffmpeg))
+            return false; // Host doesn't provide ffmpeg — skip video thumbnails gracefully.
+
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = ffmpeg,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            };
+            // Grab a single frame a few seconds in, scaled to a reasonable tile size, overwrite output.
+            psi.ArgumentList.Add("-y");
+            psi.ArgumentList.Add("-ss"); psi.ArgumentList.Add("00:00:05");
+            psi.ArgumentList.Add("-i"); psi.ArgumentList.Add(entry.Path);
+            psi.ArgumentList.Add("-frames:v"); psi.ArgumentList.Add("1");
+            psi.ArgumentList.Add("-vf"); psi.ArgumentList.Add("scale=480:-1");
+            psi.ArgumentList.Add(target);
+
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null) return false;
+            if (!proc.WaitForExit(30_000))
+            {
+                try { proc.Kill(true); } catch { /* best effort */ }
+                return false;
+            }
+            return proc.ExitCode == 0 && File.Exists(target) && new FileInfo(target).Length > 0;
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"LocalFolderSource: ffmpeg failed for '{entry.Path}': {ex.Message}");
+            return false;
+        }
+    }
+
+    private static string StableHash(string value)
+    {
+        var bytes = System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(value));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    // ── catalog cache (catalog.json) ────────────────────────────────────────────
+    private string? CachePath =>
+        _host is { InstanceCacheDirectory: { Length: > 0 } dir } ? Path.Combine(dir, CacheFileName) : null;
+
+    private void SaveCache(List<MediaEntry> catalog)
+    {
+        var path = CachePath;
+        if (path is null) return;
+        try
+        {
+            var doc = new CacheDocument(
+                Version: CacheSchemaVersion,
+                SavedUtc: DateTimeOffset.UtcNow,
+                Recursive: _recursive,
+                Folders: _folders.ToList(),
+                Entries: catalog);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var json = JsonSerializer.Serialize(doc, CacheJsonOptions);
+            File.WriteAllText(path, json);
+            lock (_gate) _catalogSavedUtc = doc.SavedUtc;
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"LocalFolderSource: failed to write catalog cache: {ex.Message}");
+        }
+    }
+
+    private bool TryLoadCache(out List<MediaEntry> catalog, out DateTimeOffset savedUtc)
+    {
+        catalog = [];
+        savedUtc = default;
+        var path = CachePath;
+        if (path is null || !File.Exists(path)) return false;
+        try
+        {
+            var doc = JsonSerializer.Deserialize<CacheDocument>(File.ReadAllText(path), CacheJsonOptions);
+            if (doc is null || doc.Version != CacheSchemaVersion) return false;
+
+            // Invalidate the cache if the folder set or recursion flag no longer matches the
+            // current settings — those change which files belong in the catalog.
+            if (doc.Recursive != _recursive ||
+                !doc.Folders.SequenceEqual(_folders, StringComparer.OrdinalIgnoreCase))
+                return false;
+
+            catalog = doc.Entries;
+            savedUtc = doc.SavedUtc;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"LocalFolderSource: failed to read catalog cache: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static readonly JsonSerializerOptions CacheJsonOptions = new()
+    {
+        WriteIndented = false,
+    };
+
+    /// <summary>Persisted catalog envelope written to <c>catalog.json</c>.</summary>
+    private sealed record CacheDocument(
+        int Version,
+        DateTimeOffset SavedUtc,
+        bool Recursive,
+        List<string> Folders,
+        List<MediaEntry> Entries);
+
     // ── IBrowsable ─────────────────────────────────────────────────────────────
 
-    // Sentinel id for this instance's single root node (the whole merged catalog).
-    private const string RootCategoryId = "__all__";
+    // Sentinel ids. A single root tile represents the instance; when both organizations are enabled
+    // it opens into two view sub-tiles ("Folders" and "By Artist"). "By Folder" browses the on-disk
+    // structure; "By Artist" browses the tag-metadata tree (Artist → Album → Track).
+    private const string RootId = "__root__";
+    private const string FolderRootId = "__folders__";
+    private const string MetadataRootId = "__artists__";
+
+    private bool ShowFolderView => _organizeBy != LocalFolderSourceProvider.OrganizeByMetadata;
+    private bool ShowMetadataView => _organizeBy != LocalFolderSourceProvider.OrganizeByFolder;
+    private bool ShowBothViews => ShowFolderView && ShowMetadataView;
 
     public async IAsyncEnumerable<SourceCategory> GetRootCategoriesAsync(
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         await Task.CompletedTask;
-        // A single tile representing this instance (its folders are an implementation detail, just
-        // like a Plex library is composed of folders behind the scenes). A user who wants separate
-        // tiles adds another instance of the plug-in. The tile is named after the instance.
-        if (_folders.Any(Directory.Exists))
+        if (!_folders.Any(Directory.Exists))
+            yield break;
+
+        // A single tile for the instance. Drilling in shows the "Folders"/"By Artist" view sub-tiles
+        // when both are enabled, or opens directly into the one enabled view otherwise.
+        var catalog = EnsureCatalog();
+        yield return new SourceCategory
         {
-            yield return new SourceCategory
-            {
-                SourceInstanceId = InstanceId,
-                CategoryId = RootCategoryId,
-                Title = DisplayName,
-                HasSubCategories = false,
-                SourceState = RootCategoryId,
-            };
-        }
+            SourceInstanceId = InstanceId,
+            CategoryId = RootId,
+            Title = DisplayName,
+            ThumbnailUrl = FirstThumbnail(catalog),
+            HasSubCategories = true,
+            SourceState = RootId,
+        };
     }
 
     public Task<BrowseResult> BrowseAsync(SourceCategory category, CancellationToken ct = default)
@@ -173,42 +489,217 @@ public sealed class LocalFolderSource :
         var node = category.SourceState as string ?? category.CategoryId;
         var catalog = EnsureCatalog();
 
-        if (node == RootCategoryId)
+        // Root tile: with both views enabled, offer the two view sub-tiles; with one view pinned,
+        // pass straight through to that view so there's no redundant middle tile.
+        if (node == RootId)
+        {
+            if (ShowBothViews)
+            {
+                var views = new List<SourceCategory>
+                {
+                    new()
+                    {
+                        SourceInstanceId = InstanceId,
+                        CategoryId = FolderRootId,
+                        Title = "Folders",
+                        Icon = "📁",
+                        ThumbnailUrl = FirstThumbnail(catalog),
+                        HasSubCategories = true,
+                        SourceState = FolderRootId,
+                    },
+                    new()
+                    {
+                        SourceInstanceId = InstanceId,
+                        CategoryId = MetadataRootId,
+                        Title = "By Artist",
+                        Icon = "🎵",
+                        ThumbnailUrl = FirstThumbnail(catalog),
+                        HasSubCategories = true,
+                        SourceState = MetadataRootId,
+                    },
+                };
+                return Task.FromResult(new BrowseResult { Categories = views });
+            }
+
+            node = ShowMetadataView ? MetadataRootId : FolderRootId;
+        }
+
+        // Metadata tree: the artist root and any artist:/album: node route to the metadata browser.
+        if (node == MetadataRootId
+            || node.StartsWith(ArtistPrefix, StringComparison.Ordinal)
+            || node.StartsWith(AlbumPrefix, StringComparison.Ordinal))
+            return Task.FromResult(BrowseByMetadata(node, catalog));
+
+        // Folder tree — a file-explorer style drill-down: each level shows its immediate subfolders
+        // and immediate files, one level at a time.
+        if (node == FolderRootId)
         {
             var existingFolders = _folders.Where(Directory.Exists).ToList();
 
-            // With multiple folders, expose each as a drill-in sub-category so the user can browse
-            // per-folder (instance → folder → files). With a single folder, stay flat (merged list).
-            if (existingFolders.Count > 1)
-            {
-                var categories = existingFolders
-                    .Select(f => new SourceCategory
-                    {
-                        SourceInstanceId = InstanceId,
-                        CategoryId = f,
-                        Title = FolderLabel(f),
-                        HasSubCategories = false,
-                        SourceState = f,
-                    })
-                    .ToList();
+            // A single configured folder is the natural root — browse straight into it. With several
+            // configured folders, list each as a top-level node (then drill into its own tree).
+            if (existingFolders.Count == 1)
+                return Task.FromResult(BrowseFolder(existingFolders[0], catalog));
 
-                // Any media directly in a configured folder's root still shows at the top level too.
-                var looseItems = catalog
-                    .Where(e => existingFolders.Contains(e.Folder))
-                    .Select(ToSourceItem)
-                    .ToList();
-
-                return Task.FromResult(new BrowseResult { Categories = categories, Items = looseItems });
-            }
-
-            // Single folder (or none): flat merged catalog.
-            return Task.FromResult(new BrowseResult { Items = catalog.Select(ToSourceItem).ToList() });
+            var roots = existingFolders
+                .Select(f => new SourceCategory
+                {
+                    SourceInstanceId = InstanceId,
+                    CategoryId = f,
+                    Title = FolderLabel(f),
+                    ThumbnailUrl = FirstThumbnail(catalog.Where(e => PathIsUnder(e.Path, f))),
+                    HasSubCategories = true,
+                    SourceState = f,
+                })
+                .ToList();
+            return Task.FromResult(new BrowseResult { Categories = roots });
         }
 
-        // A specific folder node: its files (recursively, if enabled).
-        var items = catalog.Where(e => PathIsUnder(e.Path, node)).Select(ToSourceItem).ToList();
-        return Task.FromResult(new BrowseResult { Items = items });
+        // Any other node in the folder view is a directory path — show its immediate contents.
+        return Task.FromResult(BrowseFolder(node, catalog));
     }
+
+    /// <summary>
+    /// Lists the immediate contents of one directory (file-explorer style): subfolders that contain
+    /// indexed media anywhere beneath them become drill-in sub-categories, and media files sitting
+    /// directly in this directory become leaf items. Derived from the catalog, so it reflects exactly
+    /// what was indexed (and honors the recursive setting).
+    /// </summary>
+    private BrowseResult BrowseFolder(string dir, List<MediaEntry> catalog)
+    {
+        var root = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar);
+
+        // First path segment below this directory → the full child-directory path (dedup, keep label).
+        var childDirs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var files = new List<MediaEntry>();
+
+        foreach (var e in catalog)
+        {
+            var full = Path.GetFullPath(e.Path);
+            var parent = Path.GetDirectoryName(full)?.TrimEnd(Path.DirectorySeparatorChar);
+            if (parent is null) continue;
+
+            if (string.Equals(parent, root, StringComparison.OrdinalIgnoreCase))
+            {
+                files.Add(e); // sits directly in this directory
+            }
+            else if (full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            {
+                var rel = full[(root.Length + 1)..];
+                var sep = rel.IndexOf(Path.DirectorySeparatorChar);
+                if (sep > 0)
+                {
+                    var childName = rel[..sep];
+                    childDirs[Path.Combine(root, childName)] = childName;
+                }
+            }
+        }
+
+        var categories = childDirs
+            .OrderBy(kv => kv.Value, StringComparer.OrdinalIgnoreCase)
+            .Select(kv => new SourceCategory
+            {
+                SourceInstanceId = InstanceId,
+                CategoryId = kv.Key,
+                Title = kv.Value,
+                ThumbnailUrl = FirstThumbnail(catalog.Where(e => PathIsUnder(e.Path, kv.Key))),
+                HasSubCategories = true,
+                SourceState = kv.Key,
+            })
+            .ToList();
+
+        var items = files
+            .OrderBy(e => e.Title, StringComparer.OrdinalIgnoreCase)
+            .Select(ToSourceItem)
+            .ToList();
+
+        return new BrowseResult { Categories = categories, Items = items };
+    }
+
+    // Node id prefixes for the metadata browse tree (Artist → Album → Tracks).
+    private const string ArtistPrefix = "artist:";
+    private const string AlbumPrefix = "album:";
+    private const char AlbumSeparator = '\u001F';
+    private const string UnknownArtist = "Unknown Artist";
+    private const string UnknownAlbum = "Unknown Album";
+
+    /// <summary>
+    /// Browses the catalog arranged by tag metadata: root lists artists, an artist lists its albums,
+    /// an album lists its tracks (ordered by track number). Tracks with no artist/album tags fall
+    /// under "Unknown Artist"/"Unknown Album" so nothing is hidden. Category tiles (artists/albums)
+    /// inherit a thumbnail from the first item under them (first-thumbnail-wins).
+    /// </summary>
+    private BrowseResult BrowseByMetadata(string node, List<MediaEntry> catalog)
+    {
+        if (node == MetadataRootId)
+        {
+            var artists = catalog
+                .GroupBy(e => e.Artist is { Length: > 0 } a ? a : UnknownArtist,
+                    StringComparer.OrdinalIgnoreCase)
+                .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new SourceCategory
+                {
+                    SourceInstanceId = InstanceId,
+                    CategoryId = ArtistPrefix + g.Key,
+                    Title = g.Key,
+                    ThumbnailUrl = FirstThumbnail(g),
+                    HasSubCategories = true,
+                    SourceState = ArtistPrefix + g.Key,
+                })
+                .ToList();
+            return new BrowseResult { Categories = artists };
+        }
+
+        if (node.StartsWith(ArtistPrefix, StringComparison.Ordinal))
+        {
+            var artist = node[ArtistPrefix.Length..];
+            var albums = catalog
+                .Where(e => ArtistOf(e).Equals(artist, StringComparison.OrdinalIgnoreCase))
+                .GroupBy(e => e.Album is { Length: > 0 } a ? a : UnknownAlbum,
+                    StringComparer.OrdinalIgnoreCase)
+                .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new SourceCategory
+                {
+                    SourceInstanceId = InstanceId,
+                    CategoryId = AlbumPrefix + artist + AlbumSeparator + g.Key,
+                    Title = g.Key,
+                    ThumbnailUrl = FirstThumbnail(g),
+                    HasSubCategories = false,
+                    SourceState = AlbumPrefix + artist + AlbumSeparator + g.Key,
+                })
+                .ToList();
+            return new BrowseResult { Categories = albums };
+        }
+
+        if (node.StartsWith(AlbumPrefix, StringComparison.Ordinal))
+        {
+            var payload = node[AlbumPrefix.Length..];
+            var sep = payload.IndexOf(AlbumSeparator);
+            var artist = sep >= 0 ? payload[..sep] : payload;
+            var album = sep >= 0 ? payload[(sep + 1)..] : "";
+            var tracks = catalog
+                .Where(e => ArtistOf(e).Equals(artist, StringComparison.OrdinalIgnoreCase) &&
+                            AlbumOf(e).Equals(album, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(e => e.Track == 0 ? uint.MaxValue : e.Track)
+                .ThenBy(e => e.Title, StringComparer.OrdinalIgnoreCase)
+                .Select(ToSourceItem)
+                .ToList();
+            return new BrowseResult { Items = tracks };
+        }
+
+        return new BrowseResult { Items = catalog.Select(ToSourceItem).ToList() };
+    }
+
+    private static string ArtistOf(MediaEntry e) => e.Artist is { Length: > 0 } a ? a : UnknownArtist;
+    private static string AlbumOf(MediaEntry e) => e.Album is { Length: > 0 } a ? a : UnknownAlbum;
+
+    /// <summary>
+    /// First-thumbnail-wins inheritance for a category tile: returns the thumbnail of the first
+    /// entry (in catalog order) under this node that has one on disk, or null. Cheap and predictable
+    /// — a track's thumb becomes its album's, and an album's first thumb becomes the artist's.
+    /// </summary>
+    private static string? FirstThumbnail(IEnumerable<MediaEntry> entries)
+        => entries.FirstOrDefault(e => e.ThumbnailPath is { Length: > 0 } p && File.Exists(p))?.ThumbnailPath;
 
     private static string FolderLabel(string folder)
         => Path.GetFileName(folder.TrimEnd(Path.DirectorySeparatorChar)) is { Length: > 0 } n ? n : folder;
@@ -243,9 +734,19 @@ public sealed class LocalFolderSource :
 
     public Task<SourceMetadata?> GetMetadataAsync(SourceItem item, CancellationToken ct = default)
     {
-        // Phase 1: no tag/duration probing yet. Return an empty (but non-null) metadata so the host
-        // treats the item as valid; Phase 2 can read tags/duration here.
-        return Task.FromResult<SourceMetadata?>(new SourceMetadata(null, null, []));
+        // Serve duration/year from the cached catalog (populated during rescan). If the item isn't
+        // in the catalog yet, return empty-but-non-null so the host still treats it as valid.
+        var path = item.SourceState as string ?? item.ItemId;
+        MediaEntry? entry;
+        lock (_gate)
+            entry = _catalog.FirstOrDefault(e => string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase));
+
+        var published = entry is { Year: > 0 and <= 9999 }
+            ? new DateTimeOffset(new DateTime((int)entry.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc))
+            : (DateTimeOffset?)null;
+
+        return Task.FromResult<SourceMetadata?>(
+            new SourceMetadata(entry?.Duration, null, [], published));
     }
 
     // ── IGaplessCapable ────────────────────────────────────────────────────────
@@ -259,15 +760,30 @@ public sealed class LocalFolderSource :
 
     // ── helpers ────────────────────────────────────────────────────────────────
 
-    private SourceItem ToSourceItem(MediaEntry e) => new()
+    private SourceItem ToSourceItem(MediaEntry e)
     {
-        SourceInstanceId = InstanceId,
-        ItemId = e.Path,
-        Title = e.Title,
-        Subtitle = Path.GetFileName(e.Folder.TrimEnd(Path.DirectorySeparatorChar)),
-        IsAudioOnly = e.IsAudioOnly,
-        SourceState = e.Path,
-    };
+        // Prefer a metadata subtitle (artist / artist — album) when tags are present; otherwise fall
+        // back to the containing folder name so folder-organized browsing still reads well.
+        string? subtitle = (e.Artist, e.Album) switch
+        {
+            ({ Length: > 0 } artist, { Length: > 0 } album) => $"{artist} — {album}",
+            ({ Length: > 0 } artist, _) => artist,
+            (_, { Length: > 0 } album) => album,
+            _ => Path.GetFileName(e.Folder.TrimEnd(Path.DirectorySeparatorChar)),
+        };
+
+        return new SourceItem
+        {
+            SourceInstanceId = InstanceId,
+            ItemId = e.Path,
+            Title = e.Title,
+            Subtitle = subtitle,
+            Duration = e.Duration,
+            ThumbnailUrl = e.ThumbnailPath is { Length: > 0 } thumb && File.Exists(thumb) ? thumb : null,
+            IsAudioOnly = e.IsAudioOnly,
+            SourceState = e.Path,
+        };
+    }
 
     private static bool PathIsUnder(string path, string folder)
     {
@@ -280,5 +796,23 @@ public sealed class LocalFolderSource :
         => values.TryGetValue(key, out var v) ? v : null;
 
     /// <summary>One catalog entry (a media file on disk).</summary>
-    private sealed record MediaEntry(string Path, string Title, string Folder, bool IsAudioOnly);
+    /// <remarks>
+    /// <see cref="FileSize"/> and <see cref="LastWriteTimeUtc"/> drive incremental rescans (an entry
+    /// is reused as-is when both still match on disk). Phase 2/3 fields (metadata, thumbnail path)
+    /// can be added here and will ride along in the cache automatically.
+    /// </remarks>
+    private sealed record MediaEntry(
+        string Path,
+        string Title,
+        string Folder,
+        bool IsAudioOnly,
+        long FileSize = 0,
+        DateTimeOffset LastWriteTimeUtc = default,
+        string? Artist = null,
+        string? Album = null,
+        uint Track = 0,
+        uint Year = 0,
+        TimeSpan? Duration = null,
+        bool MetadataRead = false,
+        string? ThumbnailPath = null);
 }
