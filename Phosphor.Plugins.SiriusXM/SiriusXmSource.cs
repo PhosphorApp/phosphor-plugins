@@ -1,5 +1,6 @@
 using System.Net;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Phosphor.Plugin.Abstractions;
 
 namespace Phosphor.Plugins.SiriusXM;
@@ -173,12 +174,59 @@ public sealed class SiriusXmSource :
     private async Task<IReadOnlyList<SxmChannel>> EnsureChannelsAsync(CancellationToken ct)
     {
         lock (_gate) { if (_channels != null) return _channels; }
+
+        // Try the on-disk lineup cache first (the lineup seldom changes). Fresh cache avoids the
+        // authenticated fetch entirely, making browse instant and offline-tolerant.
+        var cached = LoadLineupCache();
+        if (cached != null)
+        {
+            lock (_gate) _channels = cached;
+            return cached;
+        }
+
         var client = await EnsureClientAsync(ct);
         if (client == null) return [];
         var channels = await client.GetChannelsAsync(ct);
-        lock (_gate) _channels = channels;
+        if (channels.Count > 0)
+        {
+            lock (_gate) _channels = channels;
+            SaveLineupCache(channels);
+        }
         return channels;
     }
+
+    // ── Lineup cache (per-instance, timestamped) ────────────────────────────────
+
+    private const int LineupCacheDays = 7;
+    private string LineupCachePath =>
+        Path.Combine(_host?.InstanceCacheDirectory ?? Path.GetTempPath(), "lineup.json");
+
+    private IReadOnlyList<SxmChannel>? LoadLineupCache()
+    {
+        try
+        {
+            var path = LineupCachePath;
+            if (!File.Exists(path)) return null;
+            if (DateTime.UtcNow - File.GetLastWriteTimeUtc(path) > TimeSpan.FromDays(LineupCacheDays))
+                return null;
+            var cache = JsonSerializer.Deserialize<LineupCache>(File.ReadAllText(path));
+            return cache?.Channels is { Count: > 0 } ? cache.Channels : null;
+        }
+        catch (Exception ex) { Log($"SXM: lineup cache read failed: {ex.Message}"); return null; }
+    }
+
+    private void SaveLineupCache(IReadOnlyList<SxmChannel> channels)
+    {
+        try
+        {
+            var path = LineupCachePath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(new LineupCache(DateTimeOffset.UtcNow, channels)));
+        }
+        catch (Exception ex) { Log($"SXM: lineup cache write failed: {ex.Message}"); }
+    }
+
+    private sealed record LineupCache(DateTimeOffset FetchedUtc, IReadOnlyList<SxmChannel> Channels);
 
     private SxmProxy EnsureProxy(SxmClient client)
     {

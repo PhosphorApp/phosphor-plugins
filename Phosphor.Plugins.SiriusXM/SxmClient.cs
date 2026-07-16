@@ -90,7 +90,8 @@ public sealed class SxmClient
                     Str(ch, "name") ?? id,
                     Str(ch, "channelNumber") ?? "",
                     Str(ch, "channelGuid") ?? Str(ch, "guid") ?? "",
-                    ExtractThumb(ch)));
+                    ExtractThumb(ch),
+                    ExtractCategories(ch)));
             }
         }
         catch (Exception ex) { _log?.Invoke($"SXM channel parse failed: {ex.Message}"); }
@@ -307,6 +308,27 @@ public sealed class SxmClient
         catch { }
         return null;
     }
+
+    private static IReadOnlyList<string> ExtractCategories(JsonElement ch)
+    {
+        // Channels carry categories.categories[] with a human name (e.g. "Pop", "News", "NFL").
+        var names = new List<string>();
+        try
+        {
+            if (ch.TryGetProperty("categories", out var categories) &&
+                categories.TryGetProperty("categories", out var arr))
+            {
+                foreach (var cat in arr.EnumerateArray())
+                {
+                    var name = Str(cat, "name");
+                    if (!string.IsNullOrWhiteSpace(name) && !names.Contains(name))
+                        names.Add(name);
+                }
+            }
+        }
+        catch { }
+        return names;
+    }
 }
 
 /// <summary>A SiriusXM channel from the lineup.</summary>
@@ -315,7 +337,9 @@ public sealed class SxmClient
 /// <param name="Number">Channel number as a string (e.g. "37").</param>
 /// <param name="Guid">Channel GUID, required by now-playing-live.</param>
 /// <param name="ThumbnailUrl">Optional channel logo URL.</param>
-public sealed record SxmChannel(string Id, string Name, string Number, string Guid, string? ThumbnailUrl)
+/// <param name="Categories">Category names the channel belongs to (e.g. "Pop", "NFL"), from the lineup.</param>
+public sealed record SxmChannel(
+    string Id, string Name, string Number, string Guid, string? ThumbnailUrl, IReadOnlyList<string> Categories)
 {
     public int SortNumber => int.TryParse(Number, out var n) ? n : int.MaxValue;
 }
