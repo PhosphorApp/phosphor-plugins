@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+	Phosphor.Plugins.SiriusXM
+	A source plug-in that streams SiriusXM live channels for a logged-in subscriber. Loaded
+	dynamically by the host from its plugins/ folder — there is deliberately NO project reference
+	from the host back to this project. It references ONLY the Phosphor plug-in contract,
+	compile-only (the host supplies the single shared runtime copy).
+
+	Playback design (PROXY STYLE B): the plug-in runs a tiny local HLS proxy. It passes the SXM
+	variant playlist through, rewrites the EXT-X-KEY URI to a local endpoint that serves the
+	static AES-128 key, and injects the SXM auth token params onto segment requests. LibVLC then
+	fetches + AES-decrypts the segments itself. The host plays the local http://127.0.0.1 URL via
+	its existing StreamUrl -> new Media -> Play path (no ffmpeg in the playback path).
+  -->
+  <PropertyGroup>
+	<TargetFramework>net8.0</TargetFramework>
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+	<AssemblyName>Phosphor.Plugins.SiriusXM</AssemblyName>
+	<RootNamespace>Phosphor.Plugins.SiriusXM</RootNamespace>
+	<Version>1.0.0</Version>
+	<IsPackable>false</IsPackable>
+	<EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<!--
+	  Compile-only reference to the contract: the host owns the single runtime copy so contract
+	  types unify across the load boundary (Private=false / ExcludeAssets=runtime).
+	-->
+	<ProjectReference Include="..\Phosphor.Plugin.Abstractions\Phosphor.Plugin.Abstractions.csproj">
+	  <Private>false</Private>
+	  <ExcludeAssets>runtime</ExcludeAssets>
+	</ProjectReference>
+  </ItemGroup>
+
+  <!--
+	Self-deploy: copy this plug-in's output into the host's plugins/SiriusXM/ folder whenever THIS
+	project builds. This inverts the dependency (the plug-in deploys itself instead of relying on the
+	host's AfterBuild copy), so a plain Build of the plug-in always refreshes the deployed DLL — no
+	more stale-plugin surprises when the host is "up to date". The shared contract is excluded (the
+	host owns the single runtime copy). Runs unconditionally so incremental builds can't skip it.
+  -->
+  <Target Name="SelfDeployToHost" AfterTargets="Build">
+	<PropertyGroup>
+	  <HostPluginDest>$(MSBuildThisFileDirectory)..\Phosphor\bin\$(Configuration)\net8.0-windows\plugins\SiriusXM</HostPluginDest>
+	</PropertyGroup>
+	<ItemGroup>
+	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
+	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
+	</ItemGroup>
+	<MakeDir Directories="$(HostPluginDest)" />
+	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
+	<Message Importance="high" Text="SiriusXM plug-in self-deployed to $(HostPluginDest)" />
+  </Target>
+
+</Project>

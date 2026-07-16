@@ -1,0 +1,53 @@
+using Phosphor.Plugin.Abstractions;
+
+namespace Phosphor.Plugins.SiriusXM;
+
+/// <summary>
+/// Provider for the SiriusXM source: streams live SiriusXM channels for a logged-in subscriber.
+/// Single-instance (one account). Loaded dynamically from the host's <c>plugins/</c> folder.
+/// </summary>
+public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
+{
+    public const string SiriusXmTypeId = "siriusxm";
+
+    /// <summary>Settings key: SiriusXM account username/email.</summary>
+    public const string KeyUsername = "username";
+
+    /// <summary>Settings key: SiriusXM account password (secret).</summary>
+    public const string KeyPassword = "password";
+
+    /// <summary>Settings key: account region ("US" or "CA").</summary>
+    public const string KeyRegion = "region";
+
+    public const string RegionUs = "US";
+    public const string RegionCa = "CA";
+
+    public string TypeId => SiriusXmTypeId;
+    public string DisplayName => "SiriusXM";
+
+    public string? Description =>
+        "Streams live SiriusXM channels for a logged-in subscriber. Enter your SiriusXM account " +
+        "username and password, then use \"Test connection\" to verify. Channels are live radio " +
+        "streams (no seek or track boundaries). Requires an active SiriusXM streaming subscription.";
+
+    public Version ApiVersion => PluginApi.Current;
+
+    // One account per configured instance — a second SiriusXM login is an unusual case.
+    public bool SupportsMultipleInstances => false;
+
+    public IReadOnlyList<PluginSettingDescriptor> GetSettingsSchema() =>
+    [
+        new(KeyUsername, "Username", PluginSettingType.Text,
+            HelpText: "Your SiriusXM account email/username."),
+        new(KeyPassword, "Password", PluginSettingType.Secret, Secret: true,
+            HelpText: "Your SiriusXM account password. Stored per the host's secret settings."),
+        new(KeyRegion, "Region", PluginSettingType.Enum, DefaultValue: RegionUs,
+            HelpText: "Your account region.")
+        {
+            EnumValues = [RegionUs, RegionCa],
+        },
+    ];
+
+    public IPhosphorSource CreateInstance(string instanceId, IReadOnlyDictionary<string, string?> settings)
+        => new SiriusXmSource(instanceId, settings);
+}
