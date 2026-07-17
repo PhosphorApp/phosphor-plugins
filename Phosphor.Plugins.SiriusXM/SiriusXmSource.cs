@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.SiriusXM;
 /// suppresses seek/duration and never auto-advances.
 /// </remarks>
 public sealed class SiriusXmSource :
-    IPhosphorSource, IBrowsable, IPlayableResolver, IConnectionTestable, IFavoritable
+    IPhosphorSource, IBrowsable, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable
 {
     // Fixed local port for the proxy. High/uncommon to avoid clashes for the prototype.
     private const int ProxyPort = 8912;
@@ -34,6 +34,10 @@ public sealed class SiriusXmSource :
     // Favorited channel ids (loaded lazily from the instance dir).
     private HashSet<string>? _favoritesCache;
     private HashSet<string> _favorites => _favoritesCache ??= LoadFavorites();
+
+    // Hidden channel ids (loaded lazily from the instance dir).
+    private HashSet<string>? _hiddenCache;
+    private HashSet<string> _hidden => _hiddenCache ??= LoadHidden();
 
     public SiriusXmSource(string instanceId, IReadOnlyDictionary<string, string?> settings)
     {
@@ -157,6 +161,14 @@ public sealed class SiriusXmSource :
         }
 
         var channels = await EnsureChannelsAsync(ct);
+        // Exclude hidden channels from every browse view (categories, All Channels, and Favorites).
+        // Re-read from disk so edits made in the Settings "Manage hidden channels" dialog (a separate
+        // transient source instance) take effect on the next browse without an app restart.
+        ReloadHiddenIfChanged();
+        HashSet<string> hidden;
+        lock (_gate) hidden = new HashSet<string>(_hidden, StringComparer.Ordinal);
+        if (hidden.Count > 0)
+            channels = channels.Where(c => !hidden.Contains(c.Id)).ToList();
 
         switch (node.Kind)
         {
@@ -298,6 +310,110 @@ public sealed class SiriusXmSource :
             File.WriteAllText(path, JsonSerializer.Serialize(_favorites.ToList()));
         }
         catch (Exception ex) { Log($"SXM: favorites write failed: {ex.Message}"); }
+    }
+
+    // ── IHideable ────────────────────────────────────────────────────────────────
+
+    // Category keys that mark a channel as a sports team / play-by-play channel (the ~200 the user
+    // most often wants gone). Used by the "hide sports teams" quick action.
+    private static readonly HashSet<string> SportsTeamKeys =
+        new(StringComparer.OrdinalIgnoreCase) { "nflplay", "mlbpbp", "NHL_PBP", "NBA_PBP", "sportsplay", "college" };
+
+    public IReadOnlyList<HideableItem> GetHideableItems()
+    {
+        // Best-effort from the cached lineup; empty if not yet loaded (the manage-UI opens after browse).
+        var channels = _channels ?? LoadLineupCache() ?? [];
+        var map = CategoryMap;
+        return channels
+            .OrderBy(c => c.SortNumber)
+            .Select(c =>
+            {
+                var cat = c.Categories.Count > 0 ? c.Categories[0] : null;
+                var super = cat != null ? map.SuperGroupFor(cat.Key) : SxmCategoryMap.SuperOther;
+                return new HideableItem(
+                    c.Id,
+                    string.IsNullOrEmpty(c.Number) ? c.Name : $"{c.Number} · {c.Name}",
+                    super,           // Group: Music/Talk/Sports/Other
+                    cat?.Name);      // SubGroup: category (e.g. "Country", "NFL Play-by-Play")
+            })
+            .ToList();
+    }
+
+    public IReadOnlyCollection<string> GetHiddenIds()
+    {
+        lock (_gate) return _hidden.ToArray();
+    }
+
+    public void SetHidden(IReadOnlyCollection<string> itemIds, bool hidden)
+    {
+        if (itemIds is not { Count: > 0 }) return;
+        lock (_gate)
+        {
+            bool changed = false;
+            foreach (var id in itemIds)
+                changed |= hidden ? _hidden.Add(id) : _hidden.Remove(id);
+            if (changed) SaveHidden();
+        }
+    }
+
+    /// <summary>Convenience id set for the "hide all sports team channels" quick action.</summary>
+    public IReadOnlyCollection<string> SportsTeamChannelIds()
+    {
+        var channels = _channels ?? LoadLineupCache() ?? [];
+        return channels
+            .Where(c => c.Categories.Count > 0 && c.Categories.All(cat => SportsTeamKeys.Contains(cat.Key)))
+            .Select(c => c.Id)
+            .ToList();
+    }
+
+    private bool IsHidden(string id)
+    {
+        lock (_gate) return _hidden.Contains(id);
+    }
+
+    private string HiddenPath =>
+        Path.Combine(_host?.InstanceCacheDirectory ?? Path.GetTempPath(), "hidden.json");
+
+    private DateTime _hiddenLoadedUtc = DateTime.MinValue;
+
+    private void ReloadHiddenIfChanged()
+    {
+        try
+        {
+            var path = HiddenPath;
+            if (!File.Exists(path)) return;
+            var mtime = File.GetLastWriteTimeUtc(path);
+            if (mtime <= _hiddenLoadedUtc) return;
+            lock (_gate)
+            {
+                _hiddenCache = LoadHidden();
+                _hiddenLoadedUtc = mtime;
+            }
+        }
+        catch { /* best-effort refresh */ }
+    }
+
+    private HashSet<string> LoadHidden()
+    {
+        try
+        {
+            var path = HiddenPath;
+            if (!File.Exists(path)) return new HashSet<string>(StringComparer.Ordinal);
+            var ids = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path));
+            return new HashSet<string>(ids ?? [], StringComparer.Ordinal);
+        }
+        catch (Exception ex) { Log($"SXM: hidden read failed: {ex.Message}"); return new HashSet<string>(StringComparer.Ordinal); }
+    }
+
+    private void SaveHidden()
+    {
+        try
+        {
+            var path = HiddenPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(_hidden.ToList()));
+        }
+        catch (Exception ex) { Log($"SXM: hidden write failed: {ex.Message}"); }
     }
 
     // ── IPlayableResolver ───────────────────────────────────────────────────────

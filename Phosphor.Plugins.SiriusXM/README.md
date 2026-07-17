@@ -64,6 +64,16 @@ Implements the generic `IFavoritable` capability, so the host shows a **star** o
 the top of the root, and persist to `favorites.json` in the instance cache dir. Favorites are just
 channel ids, so they survive lineup refreshes.
 
+## Hiding channels
+
+Implements the generic `IHideable` capability. The Plug-ins tab shows a **"Manage hidden channels…"**
+button (only for `IHideable` sources) that opens a single themed modal with two side-by-side
+**multi-select** lists (Visible ⇄ Hidden) + move buttons — block/range select works for fast bulk
+hides. Below them a **category tree** (super-group → category, e.g. Music → Country) lets you hide or
+show a whole **super-group** or **category** in one click. Hidden ids persist to `hidden.json` and are
+filtered from every browse view (categories, All Channels, Favorites); the live source re-reads the
+file so changes apply on the next drill-in without an app restart.
+
 ## Configuration
 
 Plug-ins tab → add **SiriusXM** → set **Username** / **Password** (Secret) / **Region** (US/CA) →
@@ -72,8 +82,6 @@ option to protect them at rest.
 
 ## Deferred (not in v1)
 
-- Channel **hiding** (the lineup has ~200 sports team channels) — planned host-side/generic, not a
-  per-source capability (hiding is a view concern; the host already has a hide model).
 - Robust **session/token refresh** (v1 does a one-shot re-auth on HTTP 403).
 - **Now-playing metadata** (track/show titles) and channel logos beyond the lineup thumbnail.
 - Live-stream **UI polish** (tuner-style navigation, hiding the scrub bar entirely).
