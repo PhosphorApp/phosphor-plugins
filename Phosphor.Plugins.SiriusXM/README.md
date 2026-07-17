@@ -78,11 +78,11 @@ file so changes apply on the next drill-in without an app restart.
 
 Plug-ins tab → add **SiriusXM** → set **Username** / **Password** (Secret) / **Region** (US/CA) →
 **Test connection**. Credentials are `Secret` settings; enable the app's DPAPI "encrypt secrets"
-option to protect them at rest.
+option to protect them at rest. **Proxy port** (default `8912`) sets the local HLS proxy's port —
+change it only if another app already uses that port; the running proxy rebinds when you save a new value.
 
 ## Deferred (not in v1)
 
 - Robust **session/token refresh** (v1 does a one-shot re-auth on HTTP 403).
 - **Now-playing metadata** (track/show titles) and channel logos beyond the lineup thumbnail.
 - Live-stream **UI polish** (tuner-style navigation, hiding the scrub bar entirely).
-- Configurable proxy **port** (fixed at 8912).

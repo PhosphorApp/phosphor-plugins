@@ -19,8 +19,14 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
     /// <summary>Settings key: account region ("US" or "CA").</summary>
     public const string KeyRegion = "region";
 
+    /// <summary>Settings key: local HLS proxy port.</summary>
+    public const string KeyProxyPort = "proxyPort";
+
     public const string RegionUs = "US";
     public const string RegionCa = "CA";
+
+    /// <summary>Default local HLS proxy port when the setting is unset/invalid.</summary>
+    public const int DefaultProxyPort = 8912;
 
     public string TypeId => SiriusXmTypeId;
     public string DisplayName => "SiriusXM";
@@ -46,6 +52,9 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
         {
             EnumValues = [RegionUs, RegionCa],
         },
+        new(KeyProxyPort, "Proxy port", PluginSettingType.Number, DefaultValue: DefaultProxyPort.ToString(),
+            HelpText: "Local port for the built-in HLS proxy that feeds the player. " +
+                      "Change only if another app already uses this port."),
     ];
 
     public IPhosphorSource CreateInstance(string instanceId, IReadOnlyDictionary<string, string?> settings)

@@ -18,14 +18,13 @@ namespace Phosphor.Plugins.SiriusXM;
 public sealed class SiriusXmSource :
     IPhosphorSource, IBrowsable, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable
 {
-    // Fixed local port for the proxy. High/uncommon to avoid clashes for the prototype.
-    private const int ProxyPort = 8912;
-
     private readonly object _gate = new();
     private IPluginHost? _host;
     private string _username = "";
     private string _password = "";
     private string _region = SiriusXmSourceProvider.RegionUs;
+    // Local HLS proxy port (configurable; defaults to SiriusXmSourceProvider.DefaultProxyPort).
+    private int _proxyPort = SiriusXmSourceProvider.DefaultProxyPort;
 
     private SxmClient? _client;
     private SxmProxy? _proxy;
@@ -66,11 +65,21 @@ public sealed class SiriusXmSource :
         _password = Get(values, SiriusXmSourceProvider.KeyPassword) ?? "";
         _region = Get(values, SiriusXmSourceProvider.KeyRegion) is { Length: > 0 } r ? r : SiriusXmSourceProvider.RegionUs;
 
-        // Credentials changed — drop any live client/lineup so the next use re-authenticates.
+        var newPort = int.TryParse(Get(values, SiriusXmSourceProvider.KeyProxyPort), out var p) && p is > 0 and <= 65535
+            ? p : SiriusXmSourceProvider.DefaultProxyPort;
+
+        // Credentials changed — drop any live client/lineup so the next use re-authenticates. If the
+        // port changed, tear down the running proxy so it rebinds on the new port next resolve.
         lock (_gate)
         {
             _client = null;
             _channels = null;
+            if (newPort != _proxyPort)
+            {
+                _proxyPort = newPort;
+                _proxy?.Dispose();
+                _proxy = null;
+            }
         }
     }
 
@@ -525,7 +534,7 @@ public sealed class SiriusXmSource :
         lock (_gate)
         {
             if (_proxy is { IsRunning: true }) return _proxy;
-            _proxy = new SxmProxy(client, ProxyPort, Log);
+            _proxy = new SxmProxy(client, _proxyPort, Log);
             _proxy.Start();
             return _proxy;
         }
