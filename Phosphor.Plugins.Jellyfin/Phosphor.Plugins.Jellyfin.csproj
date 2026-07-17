@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+	Phosphor.Plugins.Jellyfin
+	A source plug-in that browses and plays music/video from a self-hosted Jellyfin server for a
+	logged-in user. Loaded dynamically by the host from its plugins/ folder — there is deliberately
+	NO project reference from the host back to this project. It references ONLY the Phosphor plug-in
+	contract, compile-only (the host supplies the single shared runtime copy).
+
+	Unlike SiriusXM there is NO local proxy and NO live-stream handling: Jellyfin returns direct,
+	long-lived HTTP stream URLs for finite, seekable tracks (the Plex shape). Playback goes straight
+	through the host's existing StreamUrl -> new Media -> Play path.
+
+	STEREO (2.1) NOTE: pinball cabs route surround channels to exciters for mechanical/ball sounds,
+	so playback must be limited to 2 channels. A "Stereo audio" setting asks Jellyfin to transcode /
+	downmix to 2 channels (MaxAudioChannels=2), mirroring the Plex source's stereo option.
+  -->
+  <PropertyGroup>
+	<TargetFramework>net8.0</TargetFramework>
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+	<AssemblyName>Phosphor.Plugins.Jellyfin</AssemblyName>
+	<RootNamespace>Phosphor.Plugins.Jellyfin</RootNamespace>
+	<Version>1.0.0</Version>
+	<IsPackable>false</IsPackable>
+	<EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<!--
+	  Compile-only reference to the contract: the host owns the single runtime copy so contract
+	  types unify across the load boundary (Private=false / ExcludeAssets=runtime).
+	-->
+	<ProjectReference Include="..\Phosphor.Plugin.Abstractions\Phosphor.Plugin.Abstractions.csproj">
+	  <Private>false</Private>
+	  <ExcludeAssets>runtime</ExcludeAssets>
+	</ProjectReference>
+  </ItemGroup>
+
+  <!--
+	Self-deploy: copy this plug-in's output into the host's plugins/Jellyfin/ folder whenever THIS
+	project builds. This inverts the dependency (the plug-in deploys itself instead of relying on the
+	host's AfterBuild copy), so a plain Build of the plug-in always refreshes the deployed DLL — no
+	more stale-plugin surprises when the host is "up to date". The shared contract is excluded (the
+	host owns the single runtime copy). Runs unconditionally so incremental builds can't skip it.
+  -->
+  <Target Name="SelfDeployToHost" AfterTargets="Build">
+	<PropertyGroup>
+	  <HostPluginDest>$(MSBuildThisFileDirectory)..\Phosphor\bin\$(Configuration)\net8.0-windows\plugins\Jellyfin</HostPluginDest>
+	</PropertyGroup>
+	<ItemGroup>
+	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
+	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
+	</ItemGroup>
+	<MakeDir Directories="$(HostPluginDest)" />
+	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
+	<Message Importance="high" Text="Jellyfin plug-in self-deployed to $(HostPluginDest)" />
+  </Target>
+
+</Project>
