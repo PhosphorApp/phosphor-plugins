@@ -49,6 +49,21 @@ the host (`JukeboxViewModel` / `BackglassWindow`) responds by:
 - disabling seek, and
 - not auto-advancing the queue when the stream drops.
 
+## Browsing & grouping
+
+A single **SiriusXM** root tile drills into **Music / Talk / Sports** super-groups → categories →
+channels, plus a flat **All Channels** view. Categories are discovered from the lineup JSON
+(`categories.categories[]`), and a bundled `categories.json` maps SXM category keys → super-groups.
+Drop an edited `categories.json` in the instance cache dir to re-bucket categories without a rebuild.
+The lineup is cached (`lineup.json`, 7-day freshness) so browse is instant/offline after the first fetch.
+
+## Favorites
+
+Implements the generic `IFavoritable` capability, so the host shows a **star** on each channel row
+(only because this source opts in). Starred channels appear under a **⭐ Favorites** tile floated to
+the top of the root, and persist to `favorites.json` in the instance cache dir. Favorites are just
+channel ids, so they survive lineup refreshes.
+
 ## Configuration
 
 Plug-ins tab → add **SiriusXM** → set **Username** / **Password** (Secret) / **Region** (US/CA) →
@@ -57,7 +72,8 @@ option to protect them at rest.
 
 ## Deferred (not in v1)
 
-- Channel **grouping / hiding** (the lineup has ~200 sports team channels) — currently a flat list.
+- Channel **hiding** (the lineup has ~200 sports team channels) — planned host-side/generic, not a
+  per-source capability (hiding is a view concern; the host already has a hide model).
 - Robust **session/token refresh** (v1 does a one-shot re-auth on HTTP 403).
 - **Now-playing metadata** (track/show titles) and channel logos beyond the lineup thumbnail.
 - Live-stream **UI polish** (tuner-style navigation, hiding the scrub bar entirely).

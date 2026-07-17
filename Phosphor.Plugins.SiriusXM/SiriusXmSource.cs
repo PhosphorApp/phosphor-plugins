@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.SiriusXM;
 /// suppresses seek/duration and never auto-advances.
 /// </remarks>
 public sealed class SiriusXmSource :
-    IPhosphorSource, IBrowsable, IPlayableResolver, IConnectionTestable
+    IPhosphorSource, IBrowsable, IPlayableResolver, IConnectionTestable, IFavoritable
 {
     // Fixed local port for the proxy. High/uncommon to avoid clashes for the prototype.
     private const int ProxyPort = 8912;
@@ -30,6 +30,10 @@ public sealed class SiriusXmSource :
     private SxmClient? _client;
     private SxmProxy? _proxy;
     private IReadOnlyList<SxmChannel>? _channels;
+
+    // Favorited channel ids (loaded lazily from the instance dir).
+    private HashSet<string>? _favoritesCache;
+    private HashSet<string> _favorites => _favoritesCache ??= LoadFavorites();
 
     public SiriusXmSource(string instanceId, IReadOnlyDictionary<string, string?> settings)
     {
@@ -115,6 +119,19 @@ public sealed class SiriusXmSource :
         if (node.Kind == SxmNodeKind.Root)
         {
             var groups = new List<SourceCategory>();
+            // ⭐ Favorites first, when the user has any.
+            if (_favorites.Count > 0)
+            {
+                groups.Add(new SourceCategory
+                {
+                    SourceInstanceId = InstanceId,
+                    CategoryId = "favorites",
+                    Title = "Favorites",
+                    Icon = "⭐",
+                    HasSubCategories = true,
+                    SourceState = new SxmNode(SxmNodeKind.Favorites),
+                });
+            }
             foreach (var super in new[] { SxmCategoryMap.SuperMusic, SxmCategoryMap.SuperTalk, SxmCategoryMap.SuperSports })
             {
                 groups.Add(new SourceCategory
@@ -143,6 +160,17 @@ public sealed class SiriusXmSource :
 
         switch (node.Kind)
         {
+            case SxmNodeKind.Favorites:
+            {
+                var favs = _favorites;
+                var items = channels
+                    .Where(c => favs.Contains(c.Id))
+                    .OrderBy(c => c.SortNumber)
+                    .Select(ToSourceItem)
+                    .ToList();
+                return new BrowseResult { Items = items };
+            }
+
             case SxmNodeKind.SuperGroup:
             {
                 // List the distinct categories in this super-group (that have channels), as sub-tiles.
@@ -192,6 +220,7 @@ public sealed class SiriusXmSource :
     private static SxmNode InferNode(string categoryId) => categoryId switch
     {
         "root" => new SxmNode(SxmNodeKind.Root),
+        "favorites" => new SxmNode(SxmNodeKind.Favorites),
         "all" => new SxmNode(SxmNodeKind.AllChannels),
         var s when s.StartsWith("super:", StringComparison.Ordinal) => new SxmNode(SxmNodeKind.SuperGroup, s["super:".Length..]),
         var s when s.StartsWith("cat:", StringComparison.Ordinal) => new SxmNode(SxmNodeKind.Category, s["cat:".Length..]),
@@ -222,6 +251,54 @@ public sealed class SiriusXmSource :
         // Carry the channel so ResolveAsync needs no re-fetch.
         SourceState = c,
     };
+
+    // ── IFavoritable ────────────────────────────────────────────────────────────
+
+    public bool IsFavorite(string itemId)
+    {
+        lock (_gate) return _favorites.Contains(itemId);
+    }
+
+    public void SetFavorite(string itemId, bool favorite)
+    {
+        if (string.IsNullOrEmpty(itemId)) return;
+        lock (_gate)
+        {
+            bool changed = favorite ? _favorites.Add(itemId) : _favorites.Remove(itemId);
+            if (changed) SaveFavorites();
+        }
+    }
+
+    public IReadOnlyCollection<string> GetFavoriteIds()
+    {
+        lock (_gate) return _favorites.ToArray();
+    }
+
+    private string FavoritesPath =>
+        Path.Combine(_host?.InstanceCacheDirectory ?? Path.GetTempPath(), "favorites.json");
+
+    private HashSet<string> LoadFavorites()
+    {
+        try
+        {
+            var path = FavoritesPath;
+            if (!File.Exists(path)) return new HashSet<string>(StringComparer.Ordinal);
+            var ids = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path));
+            return new HashSet<string>(ids ?? [], StringComparer.Ordinal);
+        }
+        catch (Exception ex) { Log($"SXM: favorites read failed: {ex.Message}"); return new HashSet<string>(StringComparer.Ordinal); }
+    }
+
+    private void SaveFavorites()
+    {
+        try
+        {
+            var path = FavoritesPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(_favorites.ToList()));
+        }
+        catch (Exception ex) { Log($"SXM: favorites write failed: {ex.Message}"); }
+    }
 
     // ── IPlayableResolver ───────────────────────────────────────────────────────
 

@@ -11,6 +11,9 @@ public enum SxmNodeKind
     /// <summary>The single SiriusXM root tile. Expands to the super-groups + All Channels.</summary>
     Root,
 
+    /// <summary>The user's favorited channels, floated to the top of the root.</summary>
+    Favorites,
+
     /// <summary>A super-group: Music, Talk, Sports, or Other. Expands to its categories.</summary>
     SuperGroup,
 
