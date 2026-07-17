@@ -67,3 +67,20 @@ rest. Multiple servers are supported — add another Jellyfin instance for each.
 - Paged browse (`IPagedBrowsable`) for very large libraries, scoped/in-node search
   (`IScopedSearchable`), and gapless audio (`IGaplessCapable`).
 - Now-playing / richer metadata and per-item transcode tuning.
+
+## Relationship to the Emby plug-in
+
+The Emby plug-in (`Phosphor.Plugins.Emby`) is a close sibling — Jellyfin began as a fork of Emby, so
+the REST surface is nearly identical. Some fixes discovered while building Emby were ported here:
+
+- **Auth caching** — `Configure()` clears the cached token only when the server/credentials change,
+  so a large album authenticates once instead of once per track.
+- **`ResolveAsync` re-auth** — (re)authenticates before building the stream URL so `api_key` is
+  populated.
+- **`EnableImageTypes=Primary`** on browse/search so folder items surface their Primary image tag.
+
+**Not** ported (the test Jellyfin server renders correctly without them): Emby's music entity-graph
+browsing (`/Artists` → `MusicAlbum` → `Audio`), album-art-from-track fallback, and video-library
+folder flattening. See the Emby plug-in's README "Notes / known differences" for details and porting
+guidance should a Jellyfin library ever need them.
+

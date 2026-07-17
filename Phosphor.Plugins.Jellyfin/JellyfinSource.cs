@@ -208,23 +208,35 @@ public sealed class JellyfinSource :
 
     // ── IPlayableResolver ────────────────────────────────────────────────────────
 
-    public Task<ResolvedStream?> ResolveAsync(
+    public async Task<ResolvedStream?> ResolveAsync(
         SourceItem item, PlaybackPreferences prefs, CancellationToken ct = default)
     {
         EnsureClient();
-        if (_client is null) return Task.FromResult<ResolvedStream?>(null);
+        if (_client is null) return null;
 
         var state = item.SourceState as JellyfinState;
         var itemId = state?.ItemId ?? item.ItemId;
         var audioOnly = item.IsAudioOnly || (state?.IsAudioOnly ?? false);
+
+        // Ensure we have a live access token: EnsureClient() → Configure() clears cached auth, so the
+        // token must be (re)acquired here before building the stream URL — otherwise api_key comes out
+        // empty and the server rejects the stream.
+        try
+        {
+            await _client.AuthenticateAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"JellyfinSource: resolve auth failed — {ex.Message}");
+            return null;
+        }
 
         // Note: the stereo downmix is driven by the instance's Stereo audio setting inside the client;
         // prefs.PreferStereo is an additional host hint (both point the same direction on a cab).
         var url = _client.GetStreamUrl(itemId, audioOnly);
 
         var layout = audioOnly ? StreamLayout.AudioOnly : StreamLayout.Muxed;
-        return Task.FromResult<ResolvedStream?>(
-            new ResolvedStream(StreamTransport.Http, layout, url));
+        return new ResolvedStream(StreamTransport.Http, layout, url);
     }
 
     public async Task<SourceMetadata?> GetMetadataAsync(SourceItem item, CancellationToken ct = default)

@@ -66,17 +66,30 @@ public sealed class EmbyClient
 
     public string ServerUrl => _serverUrl;
 
-    /// <summary>Applies configuration. Clears any cached auth so the next call re-authenticates.</summary>
+    /// <summary>Applies configuration. Clears cached auth ONLY when the credentials actually change,
+    /// so repeated Configure calls with identical settings don't force a re-authentication.</summary>
     public void Configure(string serverUrl, string username, string password, bool stereoAudio)
     {
-        _serverUrl = (serverUrl ?? "").Trim().TrimEnd('/');
-        _username = username ?? "";
-        _password = password ?? "";
+        var newServerUrl = (serverUrl ?? "").Trim().TrimEnd('/');
+        var newUsername = username ?? "";
+        var newPassword = password ?? "";
+
+        // Only invalidate cached auth when the server/credentials changed. Configure() is called on
+        // every EnsureClient() (i.e. once per ResolveAsync), so unconditionally wiping the token forced
+        // a fresh authentication per item — e.g. one serial auth round-trip per track in an album.
+        var credsChanged =
+            newServerUrl != _serverUrl || newUsername != _username || newPassword != _password;
+
+        _serverUrl = newServerUrl;
+        _username = newUsername;
+        _password = newPassword;
         _stereoAudio = stereoAudio;
 
-        // Invalidate cached auth — settings may have changed.
-        _accessToken = null;
-        _userId = null;
+        if (credsChanged)
+        {
+            _accessToken = null;
+            _userId = null;
+        }
     }
 
     // ── Auth ────────────────────────────────────────────────────────────────────
