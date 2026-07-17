@@ -87,32 +87,128 @@ public sealed class SiriusXmSource :
         }
     }
 
-    // ── IBrowsable (flat channel lineup) ────────────────────────────────────────
+    // ── IBrowsable (Music/Talk/Sports super-groups → categories → channels) ─────
 
     public async IAsyncEnumerable<SourceCategory> GetRootCategoriesAsync(
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        // Flat first cut: a single "All Channels" category. Grouping/hiding comes later.
+        // A single "SiriusXM" root tile (keeps the home screen tidy alongside playlists/other
+        // sources). Drilling in reveals the super-groups + All Channels. STATIC — no lineup fetch
+        // here (the host enumerates roots at startup; a network call would block the splash).
         await Task.CompletedTask;
         yield return new SourceCategory
         {
             SourceInstanceId = InstanceId,
-            CategoryId = "all",
-            Title = "All Channels",
-            Icon = "📻",
-            HasSubCategories = false,
+            CategoryId = "root",
+            Title = DisplayName,
+            Icon = "📡",
+            HasSubCategories = true,
+            SourceState = new SxmNode(SxmNodeKind.Root),
         };
     }
 
     public async Task<BrowseResult> BrowseAsync(SourceCategory category, CancellationToken ct = default)
     {
+        var node = category.SourceState as SxmNode ?? InferNode(category.CategoryId);
+
+        // Root expands to the super-group tiles + All Channels — static, no lineup needed.
+        if (node.Kind == SxmNodeKind.Root)
+        {
+            var groups = new List<SourceCategory>();
+            foreach (var super in new[] { SxmCategoryMap.SuperMusic, SxmCategoryMap.SuperTalk, SxmCategoryMap.SuperSports })
+            {
+                groups.Add(new SourceCategory
+                {
+                    SourceInstanceId = InstanceId,
+                    CategoryId = $"super:{super}",
+                    Title = super,
+                    Icon = SuperGroupIcon(super),
+                    HasSubCategories = true,
+                    SourceState = new SxmNode(SxmNodeKind.SuperGroup, super),
+                });
+            }
+            groups.Add(new SourceCategory
+            {
+                SourceInstanceId = InstanceId,
+                CategoryId = "all",
+                Title = "All Channels",
+                Icon = "📻",
+                HasSubCategories = true,
+                SourceState = new SxmNode(SxmNodeKind.AllChannels),
+            });
+            return new BrowseResult { Categories = groups };
+        }
+
         var channels = await EnsureChannelsAsync(ct);
-        var items = channels
-            .OrderBy(c => c.SortNumber)
-            .Select(ToSourceItem)
-            .ToList();
-        return new BrowseResult { Items = items };
+
+        switch (node.Kind)
+        {
+            case SxmNodeKind.SuperGroup:
+            {
+                // List the distinct categories in this super-group (that have channels), as sub-tiles.
+                var map = CategoryMap;
+                var cats = channels
+                    .SelectMany(c => c.Categories)
+                    .Where(cat => map.SuperGroupFor(cat.Key) == node.Key)
+                    .GroupBy(cat => cat.Key)
+                    .Select(g => (Key: g.Key, Name: g.First().Name, Count: g.Count()))
+                    .OrderByDescending(g => g.Count)
+                    .ThenBy(g => g.Name, StringComparer.OrdinalIgnoreCase)
+                    .Select(g => new SourceCategory
+                    {
+                        SourceInstanceId = InstanceId,
+                        CategoryId = $"cat:{g.Key}",
+                        Title = g.Name,
+                        Icon = "🎶",
+                        HasSubCategories = true,
+                        SourceState = new SxmNode(SxmNodeKind.Category, g.Key),
+                    })
+                    .ToList();
+                return new BrowseResult { Categories = cats };
+            }
+
+            case SxmNodeKind.Category:
+            {
+                var items = channels
+                    .Where(c => c.Categories.Any(cat => string.Equals(cat.Key, node.Key, StringComparison.OrdinalIgnoreCase)))
+                    .OrderBy(c => c.SortNumber)
+                    .Select(ToSourceItem)
+                    .ToList();
+                return new BrowseResult { Items = items };
+            }
+
+            case SxmNodeKind.AllChannels:
+            default:
+            {
+                var items = channels
+                    .OrderBy(c => c.SortNumber)
+                    .Select(ToSourceItem)
+                    .ToList();
+                return new BrowseResult { Items = items };
+            }
+        }
     }
+
+    private static SxmNode InferNode(string categoryId) => categoryId switch
+    {
+        "root" => new SxmNode(SxmNodeKind.Root),
+        "all" => new SxmNode(SxmNodeKind.AllChannels),
+        var s when s.StartsWith("super:", StringComparison.Ordinal) => new SxmNode(SxmNodeKind.SuperGroup, s["super:".Length..]),
+        var s when s.StartsWith("cat:", StringComparison.Ordinal) => new SxmNode(SxmNodeKind.Category, s["cat:".Length..]),
+        _ => new SxmNode(SxmNodeKind.Root),
+    };
+
+    private static string SuperGroupIcon(string super) => super switch
+    {
+        SxmCategoryMap.SuperMusic => "🎵",
+        SxmCategoryMap.SuperTalk => "🗣",
+        SxmCategoryMap.SuperSports => "🏈",
+        _ => "📻",
+    };
+
+    private SxmCategoryMap? _categoryMap;
+    private SxmCategoryMap CategoryMap =>
+        _categoryMap ??= SxmCategoryMap.Load(_host?.InstanceCacheDirectory, Log);
 
     private SourceItem ToSourceItem(SxmChannel c) => new()
     {
@@ -210,7 +306,8 @@ public sealed class SiriusXmSource :
             if (DateTime.UtcNow - File.GetLastWriteTimeUtc(path) > TimeSpan.FromDays(LineupCacheDays))
                 return null;
             var cache = JsonSerializer.Deserialize<LineupCache>(File.ReadAllText(path));
-            return cache?.Channels is { Count: > 0 } ? cache.Channels : null;
+            if (cache is null || cache.Version != LineupCacheVersion) return null;
+            return cache.Channels is { Count: > 0 } ? cache.Channels : null;
         }
         catch (Exception ex) { Log($"SXM: lineup cache read failed: {ex.Message}"); return null; }
     }
@@ -221,12 +318,14 @@ public sealed class SiriusXmSource :
         {
             var path = LineupCachePath;
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, JsonSerializer.Serialize(new LineupCache(DateTimeOffset.UtcNow, channels)));
+            File.WriteAllText(path, JsonSerializer.Serialize(new LineupCache(LineupCacheVersion, DateTimeOffset.UtcNow, channels)));
         }
         catch (Exception ex) { Log($"SXM: lineup cache write failed: {ex.Message}"); }
     }
 
-    private sealed record LineupCache(DateTimeOffset FetchedUtc, IReadOnlyList<SxmChannel> Channels);
+    // Bump when the SxmChannel shape changes so old caches are rejected (tester-only: no migration).
+    private const int LineupCacheVersion = 2;
+    private sealed record LineupCache(int Version, DateTimeOffset FetchedUtc, IReadOnlyList<SxmChannel> Channels);
 
     private SxmProxy EnsureProxy(SxmClient client)
     {

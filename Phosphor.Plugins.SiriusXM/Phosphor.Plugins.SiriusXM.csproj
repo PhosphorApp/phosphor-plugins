@@ -35,6 +35,14 @@
 	</ProjectReference>
   </ItemGroup>
 
+  <ItemGroup>
+	<!-- Bundled default super-group map (Music/Talk/Sports → category keys). Copied to output and
+		 deployed; a user copy in the instance cache dir overrides it at runtime. -->
+	<None Update="categories.json">
+	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</None>
+  </ItemGroup>
+
   <!--
 	Self-deploy: copy this plug-in's output into the host's plugins/SiriusXM/ folder whenever THIS
 	project builds. This inverts the dependency (the plug-in deploys itself instead of relying on the
@@ -50,6 +58,7 @@
 	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
 	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
 	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
+	  <SelfDeployFiles Include="$(TargetDir)categories.json" Condition="Exists('$(TargetDir)categories.json')" />
 	</ItemGroup>
 	<MakeDir Directories="$(HostPluginDest)" />
 	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />

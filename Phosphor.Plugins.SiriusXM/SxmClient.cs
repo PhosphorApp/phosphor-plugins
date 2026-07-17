@@ -309,10 +309,12 @@ public sealed class SxmClient
         return null;
     }
 
-    private static IReadOnlyList<string> ExtractCategories(JsonElement ch)
+    private static IReadOnlyList<SxmCategoryRef> ExtractCategories(JsonElement ch)
     {
-        // Channels carry categories.categories[] with a human name (e.g. "Pop", "News", "NFL").
-        var names = new List<string>();
+        // Channels carry categories.categories[] with a stable key (e.g. "rock", "nflplay") and a
+        // human name. We keep both: the key drives grouping (survives display-name changes), the
+        // name labels the tile.
+        var cats = new List<SxmCategoryRef>();
         try
         {
             if (ch.TryGetProperty("categories", out var categories) &&
@@ -320,14 +322,14 @@ public sealed class SxmClient
             {
                 foreach (var cat in arr.EnumerateArray())
                 {
-                    var name = Str(cat, "name");
-                    if (!string.IsNullOrWhiteSpace(name) && !names.Contains(name))
-                        names.Add(name);
+                    var key = Str(cat, "key");
+                    if (string.IsNullOrWhiteSpace(key) || cats.Any(c => c.Key == key)) continue;
+                    cats.Add(new SxmCategoryRef(key, Str(cat, "name") ?? key));
                 }
             }
         }
         catch { }
-        return names;
+        return cats;
     }
 }
 
@@ -337,9 +339,13 @@ public sealed class SxmClient
 /// <param name="Number">Channel number as a string (e.g. "37").</param>
 /// <param name="Guid">Channel GUID, required by now-playing-live.</param>
 /// <param name="ThumbnailUrl">Optional channel logo URL.</param>
-/// <param name="Categories">Category names the channel belongs to (e.g. "Pop", "NFL"), from the lineup.</param>
+/// <param name="Categories">Categories the channel belongs to (key + name), from the lineup.</param>
 public sealed record SxmChannel(
-    string Id, string Name, string Number, string Guid, string? ThumbnailUrl, IReadOnlyList<string> Categories)
+    string Id, string Name, string Number, string Guid, string? ThumbnailUrl, IReadOnlyList<SxmCategoryRef> Categories)
 {
     public int SortNumber => int.TryParse(Number, out var n) ? n : int.MaxValue;
 }
+
+/// <summary>A category a channel belongs to: a stable <paramref name="Key"/> (e.g. "nflplay") and a
+/// display <paramref name="Name"/> (e.g. "NFL Play-by-Play").</summary>
+public sealed record SxmCategoryRef(string Key, string Name);

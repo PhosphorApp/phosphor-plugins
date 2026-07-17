@@ -1,0 +1,14 @@
+{
+  "Music": [
+    "rock", "pop", "country", "hiphop", "world", "canadianmusic", "discovery", "dance",
+    "jazz", "chill", "00s", "70s", "90s", "hits", "50s60s", "80s", "10s", "global",
+    "christian", "party", "workout"
+  ],
+  "Talk": [
+    "entertainment", "publicradio", "comedy", "moretalk", "political", "canadiantalk",
+    "religion", "howardstern", "kids"
+  ],
+  "Sports": [
+    "sportsplay", "nflplay", "mlbpbp", "NHL_PBP", "NBA_PBP", "sportstalk", "college"
+  ]
+}
