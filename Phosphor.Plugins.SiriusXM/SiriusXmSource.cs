@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.SiriusXM;
 /// suppresses seek/duration and never auto-advances.
 /// </remarks>
 public sealed class SiriusXmSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable, IDisposable
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
@@ -335,6 +335,17 @@ public sealed class SiriusXmSource :
         lock (_gate) return _favorites.ToArray();
     }
 
+    /// <summary>Rebuilds a playable channel item from its id, using the cached lineup.</summary>
+    public SourceItem? GetFavorite(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId)) return null;
+        IReadOnlyList<SxmChannel>? channels;
+        lock (_gate) channels = _channels;
+        channels ??= LoadLineupCache();
+        var ch = channels?.FirstOrDefault(c => c.Id == itemId);
+        return ch is null ? null : ToSourceItem(ch);
+    }
+
     private string FavoritesPath =>
         Path.Combine(_host?.InstanceCacheDirectory ?? Path.GetTempPath(), "favorites.json");
 
@@ -578,6 +589,15 @@ public sealed class SiriusXmSource :
             _proxy.Start();
             return _proxy;
         }
+    }
+
+    /// <summary>Releases the local HLS proxy (frees its port) when the host rebuilds/tears down the
+    /// source — otherwise the HttpListener lingers and the next instance can't bind the port.</summary>
+    public void Dispose()
+    {
+        SxmProxy? proxy;
+        lock (_gate) { proxy = _proxy; _proxy = null; }
+        try { proxy?.Dispose(); } catch { /* best-effort */ }
     }
 
     private void Log(string message) => _host?.Log(message);

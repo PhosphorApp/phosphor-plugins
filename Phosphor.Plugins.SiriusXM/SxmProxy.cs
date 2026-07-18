@@ -32,25 +32,50 @@ public sealed class SxmProxy : IDisposable
     private string _variantUrl = "";
     private Uri? _variantBase;
 
-    public int Port { get; }
+    public int Port { get; private set; }
     public bool IsRunning { get; private set; }
+
+    private readonly int _basePort;
 
     public SxmProxy(SxmClient client, int port, Action<string>? log = null)
     {
         _client = client;
         Port = port;
+        _basePort = port;
         _log = log;
-        _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        // Prefix is added in Start() (after the bound port is finalized), so fallback can re-point it.
     }
 
     public void Start()
     {
         if (IsRunning) return;
-        _listener.Start();
-        _cts = new CancellationTokenSource();
-        IsRunning = true;
-        _ = Task.Run(() => LoopAsync(_cts.Token));
-        _log?.Invoke($"SXM proxy listening on http://127.0.0.1:{Port}/");
+
+        // Bind resiliently: the configured port can still be held by a not-yet-released HttpListener
+        // from a prior source instance (settings rebuild). Try the base port, then a small range.
+        HttpListenerException? last = null;
+        for (var p = _basePort; p <= _basePort + 10; p++)
+        {
+            try
+            {
+                _listener.Prefixes.Clear();
+                _listener.Prefixes.Add($"http://127.0.0.1:{p}/");
+                _listener.Start();
+                Port = p;
+                if (p != _basePort) _log?.Invoke($"SXM proxy: port {_basePort} busy, bound {p} instead.");
+                _cts = new CancellationTokenSource();
+                IsRunning = true;
+                _ = Task.Run(() => LoopAsync(_cts.Token));
+                _log?.Invoke($"SXM proxy listening on http://127.0.0.1:{Port}/");
+                return;
+            }
+            catch (HttpListenerException ex)
+            {
+                last = ex;
+            }
+        }
+        _log?.Invoke($"SXM proxy: could not bind any port in {_basePort}..{_basePort + 10}: {last?.Message}");
+        if (last != null) throw last;
+        throw new InvalidOperationException("SXM proxy failed to bind a port.");
     }
 
     /// <summary>
@@ -84,7 +109,10 @@ public sealed class SxmProxy : IDisposable
             _variantUrl = new Uri(masterUri, variantRel).ToString();
             _variantBase = new Uri(_variantUrl);
         }
-        return $"http://127.0.0.1:{Port}/master.m3u8";
+        // Unique per-channel URL: the proxy routes on the path suffix (master.m3u8) and ignores the
+        // query, but a distinct URL forces LibVLC to re-open the stream on a channel switch instead of
+        // keeping the previous channel's buffered audio (the local master URL is otherwise identical).
+        return $"http://127.0.0.1:{Port}/master.m3u8?ch={Uri.EscapeDataString(channel.Id)}&t={DateTimeOffset.UtcNow.Ticks}";
     }
 
     private async Task LoopAsync(CancellationToken ct)

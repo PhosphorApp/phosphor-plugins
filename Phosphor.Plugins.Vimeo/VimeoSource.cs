@@ -328,6 +328,24 @@ public sealed class VimeoSource :
         lock (_gate) return _favorites.Keys.ToArray();
     }
 
+    /// <summary>Rebuilds a playable item from a favorited id, using the stored rich record.</summary>
+    public SourceItem? GetFavorite(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId)) return null;
+        VimeoFavorite? f;
+        lock (_gate) f = _favorites.TryGetValue(itemId, out var rec) ? rec : null;
+        if (f is null) return null;
+        return new SourceItem
+        {
+            SourceInstanceId = InstanceId,
+            ItemId = f.Id,
+            Title = f.Title,
+            ThumbnailUrl = f.ThumbnailUrl,
+            Duration = f.DurationSeconds is { } s ? TimeSpan.FromSeconds(s) : null,
+            SourceState = new VimeoState(f.Url),
+        };
+    }
+
     private string FavoritesPath =>
         Path.Combine(_host?.InstanceCacheDirectory ?? Path.GetTempPath(), "favorites.json");
 
