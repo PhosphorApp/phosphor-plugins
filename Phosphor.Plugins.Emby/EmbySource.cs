@@ -38,7 +38,8 @@ internal enum EmbyMusicLevel
 /// essential on pinball cabs where surround channels drive mechanical/ball exciters.
 /// </summary>
 public sealed class EmbySource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IConfigurable
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IConfigurable,
+    IFavoritable, IFavoriteCapture
 {
     private EmbyClient? _client;
     private IPluginHost? _host;
@@ -505,4 +506,133 @@ public sealed class EmbySource :
 
     private static string? Get(IReadOnlyDictionary<string, string?> values, string key) =>
         values.TryGetValue(key, out var v) ? v : null;
+
+    // ── IFavoritable / IFavoriteCapture ──────────────────────────────────────────
+    // Emby resolves streams fresh by id, so favorites persist a small record. Containers (artist/album)
+    // must keep the full EmbyState (CollectionType + MusicLevel) so entity-typed browse expands them
+    // correctly; leaves need only the id + audio flag.
+
+    private sealed class EmbyFavorite
+    {
+        public string Id { get; set; } = "";
+        public string Title { get; set; } = "";
+        public string? Subtitle { get; set; }
+        public string? ThumbnailUrl { get; set; }
+        public double? DurationSeconds { get; set; }
+        public bool IsAudioOnly { get; set; }
+        public bool IsContainer { get; set; }
+        public string? CollectionType { get; set; }
+        public EmbyMusicLevel MusicLevel { get; set; } = EmbyMusicLevel.None;
+    }
+
+    private readonly object _favGate = new();
+    private Dictionary<string, EmbyFavorite>? _favoritesCache;
+    private Dictionary<string, EmbyFavorite> FavStore => _favoritesCache ??= LoadFavorites();
+
+    private string FavoritesPath =>
+        Path.Combine(_host?.InstanceCacheDirectory ?? Path.GetTempPath(), "favorites.json");
+
+    public bool IsFavorite(string itemId)
+    {
+        lock (_favGate) return FavStore.ContainsKey(itemId);
+    }
+
+    public void SetFavorite(string itemId, bool favorite)
+    {
+        if (string.IsNullOrEmpty(itemId)) return;
+        lock (_favGate)
+        {
+            bool changed;
+            if (favorite)
+            {
+                changed = !FavStore.ContainsKey(itemId);
+                if (!FavStore.ContainsKey(itemId))
+                    FavStore[itemId] = new EmbyFavorite { Id = itemId, Title = itemId };
+            }
+            else
+            {
+                changed = FavStore.Remove(itemId);
+            }
+            if (changed) SaveFavorites();
+        }
+    }
+
+    public void RememberFavorite(FavoriteCapture item)
+    {
+        if (string.IsNullOrEmpty(item.ItemId)) return;
+        var node = item.ContainerState as EmbyState;
+        lock (_favGate)
+        {
+            if (!FavStore.ContainsKey(item.ItemId)) return;
+            FavStore[item.ItemId] = new EmbyFavorite
+            {
+                Id = item.ItemId,
+                Title = item.Title,
+                Subtitle = item.Subtitle,
+                ThumbnailUrl = item.ThumbnailUrl,
+                DurationSeconds = item.Duration?.TotalSeconds,
+                IsAudioOnly = item.IsAudioOnly,
+                IsContainer = item.IsContainer,
+                CollectionType = node?.CollectionType,
+                MusicLevel = node?.MusicLevel ?? EmbyMusicLevel.None,
+            };
+            SaveFavorites();
+        }
+    }
+
+    public IReadOnlyCollection<string> GetFavoriteIds()
+    {
+        lock (_favGate) return FavStore.Keys.ToArray();
+    }
+
+    public SourceItem? GetFavorite(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId)) return null;
+        EmbyFavorite? f;
+        lock (_favGate) f = FavStore.TryGetValue(itemId, out var rec) ? rec : null;
+        if (f is null) return null;
+        return new SourceItem
+        {
+            SourceInstanceId = InstanceId,
+            ItemId = f.Id,
+            Title = f.Title,
+            Subtitle = f.Subtitle,
+            ThumbnailUrl = f.ThumbnailUrl,
+            IsAudioOnly = f.IsAudioOnly,
+            IsContainer = f.IsContainer,
+            Duration = f.DurationSeconds is { } s ? TimeSpan.FromSeconds(s) : null,
+            SourceState = new EmbyState(f.Id, f.IsAudioOnly, f.CollectionType, f.MusicLevel),
+        };
+    }
+
+    private Dictionary<string, EmbyFavorite> LoadFavorites()
+    {
+        try
+        {
+            var path = FavoritesPath;
+            if (!File.Exists(path)) return new Dictionary<string, EmbyFavorite>(StringComparer.Ordinal);
+            var list = JsonSerializer.Deserialize<List<EmbyFavorite>>(File.ReadAllText(path));
+            return (list ?? []).Where(f => !string.IsNullOrEmpty(f.Id))
+                .ToDictionary(f => f.Id, f => f, StringComparer.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"Emby: favorites read failed: {ex.Message}");
+            return new Dictionary<string, EmbyFavorite>(StringComparer.Ordinal);
+        }
+    }
+
+    private void SaveFavorites()
+    {
+        try
+        {
+            var path = FavoritesPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(FavStore.Values.ToList()));
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"Emby: favorites write failed: {ex.Message}");
+        }
+    }
 }

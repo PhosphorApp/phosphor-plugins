@@ -21,7 +21,8 @@ internal sealed record JellyfinState(string ItemId, bool IsAudioOnly);
 /// essential on pinball cabs where surround channels drive mechanical/ball exciters.
 /// </summary>
 public sealed class JellyfinSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IConfigurable
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IConfigurable,
+    IFavoritable, IFavoriteCapture
 {
     private JellyfinClient? _client;
     private IPluginHost? _host;
@@ -393,4 +394,128 @@ public sealed class JellyfinSource :
 
     private static string? Get(IReadOnlyDictionary<string, string?> values, string key) =>
         values.TryGetValue(key, out var v) ? v : null;
+
+    // ── IFavoritable / IFavoriteCapture ──────────────────────────────────────────
+    // Jellyfin resolves streams fresh by item id, so favorites persist a small record (id, display,
+    // audio flag, container flag). Leaves and containers (artist/album) both rebuild from the id via
+    // a JellyfinState; containers return IsContainer=true so the host drills in / play-alls.
+
+    private sealed class JfFavorite
+    {
+        public string Id { get; set; } = "";
+        public string Title { get; set; } = "";
+        public string? Subtitle { get; set; }
+        public string? ThumbnailUrl { get; set; }
+        public double? DurationSeconds { get; set; }
+        public bool IsAudioOnly { get; set; }
+        public bool IsContainer { get; set; }
+    }
+
+    private readonly object _favGate = new();
+    private Dictionary<string, JfFavorite>? _favoritesCache;
+    private Dictionary<string, JfFavorite> FavStore => _favoritesCache ??= LoadFavorites();
+
+    private string FavoritesPath =>
+        Path.Combine(_host?.InstanceCacheDirectory ?? Path.GetTempPath(), "favorites.json");
+
+    public bool IsFavorite(string itemId)
+    {
+        lock (_favGate) return FavStore.ContainsKey(itemId);
+    }
+
+    public void SetFavorite(string itemId, bool favorite)
+    {
+        if (string.IsNullOrEmpty(itemId)) return;
+        lock (_favGate)
+        {
+            bool changed;
+            if (favorite)
+            {
+                changed = !FavStore.ContainsKey(itemId);
+                if (!FavStore.ContainsKey(itemId))
+                    FavStore[itemId] = new JfFavorite { Id = itemId, Title = itemId };
+            }
+            else
+            {
+                changed = FavStore.Remove(itemId);
+            }
+            if (changed) SaveFavorites();
+        }
+    }
+
+    public void RememberFavorite(FavoriteCapture item)
+    {
+        if (string.IsNullOrEmpty(item.ItemId)) return;
+        lock (_favGate)
+        {
+            if (!FavStore.ContainsKey(item.ItemId)) return;
+            FavStore[item.ItemId] = new JfFavorite
+            {
+                Id = item.ItemId,
+                Title = item.Title,
+                Subtitle = item.Subtitle,
+                ThumbnailUrl = item.ThumbnailUrl,
+                DurationSeconds = item.Duration?.TotalSeconds,
+                IsAudioOnly = item.IsAudioOnly,
+                IsContainer = item.IsContainer,
+            };
+            SaveFavorites();
+        }
+    }
+
+    public IReadOnlyCollection<string> GetFavoriteIds()
+    {
+        lock (_favGate) return FavStore.Keys.ToArray();
+    }
+
+    public SourceItem? GetFavorite(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId)) return null;
+        JfFavorite? f;
+        lock (_favGate) f = FavStore.TryGetValue(itemId, out var rec) ? rec : null;
+        if (f is null) return null;
+        return new SourceItem
+        {
+            SourceInstanceId = InstanceId,
+            ItemId = f.Id,
+            Title = f.Title,
+            Subtitle = f.Subtitle,
+            ThumbnailUrl = f.ThumbnailUrl,
+            IsAudioOnly = f.IsAudioOnly,
+            IsContainer = f.IsContainer,
+            Duration = f.DurationSeconds is { } s ? TimeSpan.FromSeconds(s) : null,
+            SourceState = new JellyfinState(f.Id, f.IsAudioOnly),
+        };
+    }
+
+    private Dictionary<string, JfFavorite> LoadFavorites()
+    {
+        try
+        {
+            var path = FavoritesPath;
+            if (!File.Exists(path)) return new Dictionary<string, JfFavorite>(StringComparer.Ordinal);
+            var list = JsonSerializer.Deserialize<List<JfFavorite>>(File.ReadAllText(path));
+            return (list ?? []).Where(f => !string.IsNullOrEmpty(f.Id))
+                .ToDictionary(f => f.Id, f => f, StringComparer.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"Jellyfin: favorites read failed: {ex.Message}");
+            return new Dictionary<string, JfFavorite>(StringComparer.Ordinal);
+        }
+    }
+
+    private void SaveFavorites()
+    {
+        try
+        {
+            var path = FavoritesPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(FavStore.Values.ToList()));
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"Jellyfin: favorites write failed: {ex.Message}");
+        }
+    }
 }
