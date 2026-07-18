@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+	Phosphor.Plugins.Vimeo
+	A source plug-in that plays Vimeo videos. Loaded dynamically by the host from its plugins/
+	folder — there is deliberately NO project reference from the host back to this project. It
+	references ONLY the Phosphor plug-in contract, compile-only (the host supplies the single shared
+	runtime copy).
+
+	MVP shape: no Vimeo API. The user pastes one or more Vimeo URLs; the plug-in lists them as
+	playable items and resolves each to a short-lived stream by shelling out to the host-bundled
+	yt-dlp (via IPluginHost.GetToolPath), reusing yt-dlp's mature Vimeo extractor. This mirrors the
+	in-box YouTube source's yt-dlp path, but reuses the TOOL rather than the host's internal engine
+	(which is unreachable across the plug-in load boundary). Official-API search/browse is a
+	documented follow-up.
+  -->
+  <PropertyGroup>
+	<TargetFramework>net8.0</TargetFramework>
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+	<AssemblyName>Phosphor.Plugins.Vimeo</AssemblyName>
+	<RootNamespace>Phosphor.Plugins.Vimeo</RootNamespace>
+	<Version>1.0.0</Version>
+	<IsPackable>false</IsPackable>
+	<EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<!--
+	  Compile-only reference to the contract: the host owns the single runtime copy so contract
+	  types unify across the load boundary (Private=false / ExcludeAssets=runtime).
+	-->
+	<ProjectReference Include="..\Phosphor.Plugin.Abstractions\Phosphor.Plugin.Abstractions.csproj">
+	  <Private>false</Private>
+	  <ExcludeAssets>runtime</ExcludeAssets>
+	</ProjectReference>
+  </ItemGroup>
+
+  <!--
+	Self-deploy: copy this plug-in's output into the host's plugins/Vimeo/ folder whenever THIS
+	project builds, so a plain Build always refreshes the deployed DLL (no stale-plugin surprises).
+	The shared contract is excluded (the host owns the single runtime copy). Runs unconditionally so
+	incremental builds can't skip it. Mirrors the Jellyfin/SiriusXM plug-ins.
+  -->
+  <Target Name="SelfDeployToHost" AfterTargets="Build">
+	<PropertyGroup>
+	  <HostPluginDest>$(MSBuildThisFileDirectory)..\Phosphor\bin\$(Configuration)\net8.0-windows\plugins\Vimeo</HostPluginDest>
+	</PropertyGroup>
+	<ItemGroup>
+	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
+	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
+	</ItemGroup>
+	<MakeDir Directories="$(HostPluginDest)" />
+	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
+	<Message Importance="high" Text="Vimeo plug-in self-deployed to $(HostPluginDest)" />
+  </Target>
+
+</Project>
