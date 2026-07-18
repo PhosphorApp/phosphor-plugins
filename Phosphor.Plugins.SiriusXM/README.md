@@ -64,6 +64,15 @@ Implements the generic `IFavoritable` capability, so the host shows a **star** o
 the top of the root, and persist to `favorites.json` in the instance cache dir. Favorites are just
 channel ids, so they survive lineup refreshes.
 
+## Search
+
+Implements the generic `ITextSearchCapable` capability — a simple case-insensitive **substring filter**
+over the cached lineup, matching each channel's **name, number, or category names**. So "NHL" surfaces
+**NHL Radio** even though it's buried under Sports, and "howard" finds the Howard Stern channels. It's a
+filter, not a fuzzy/relevance search. Hidden channels are excluded, mirroring browse. Because the source
+opts into search, the host binds the search box to SiriusXM (and greys out the global search-source
+selector) while it's the active source.
+
 ## Hiding channels
 
 Implements the generic `IHideable` capability. The Plug-ins tab shows a **"Manage hidden channels…"**

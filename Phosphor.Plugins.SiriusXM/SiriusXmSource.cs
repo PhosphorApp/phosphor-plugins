@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.SiriusXM;
 /// suppresses seek/duration and never auto-advances.
 /// </remarks>
 public sealed class SiriusXmSource :
-    IPhosphorSource, IBrowsable, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
@@ -259,6 +259,46 @@ public sealed class SiriusXmSource :
     private SxmCategoryMap? _categoryMap;
     private SxmCategoryMap CategoryMap =>
         _categoryMap ??= SxmCategoryMap.Load(_host?.InstanceCacheDirectory, Log);
+
+    // ── ITextSearchCapable ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Filters the channel lineup by a free-text <paramref name="query"/> — matches channel name,
+    /// number, or any of its category names (e.g. "NHL" surfaces "NHL Radio" buried under Sports).
+    /// Not a fuzzy/relevance search; a simple case-insensitive substring filter over the cached
+    /// lineup. Hidden channels are excluded, mirroring browse.
+    /// </summary>
+    public async IAsyncEnumerable<SourceItem> SearchAsync(
+        string query, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var q = query?.Trim() ?? "";
+        if (q.Length == 0) yield break;
+
+        var channels = await EnsureChannelsAsync(ct);
+
+        // Exclude hidden channels, like the browse views do.
+        ReloadHiddenIfChanged();
+        HashSet<string> hidden;
+        lock (_gate) hidden = new HashSet<string>(_hidden, StringComparer.Ordinal);
+
+        foreach (var c in channels
+            .Where(c => !hidden.Contains(c.Id) && MatchesQuery(c, q))
+            .OrderBy(c => c.SortNumber))
+        {
+            ct.ThrowIfCancellationRequested();
+            yield return ToSourceItem(c);
+        }
+    }
+
+    // Case-insensitive substring match over name, number, and category names.
+    private static bool MatchesQuery(SxmChannel c, string q)
+    {
+        if (c.Name.Contains(q, StringComparison.OrdinalIgnoreCase)) return true;
+        if (!string.IsNullOrEmpty(c.Number) && c.Number.Contains(q, StringComparison.OrdinalIgnoreCase)) return true;
+        foreach (var cat in c.Categories)
+            if (cat.Name.Contains(q, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
 
     private SourceItem ToSourceItem(SxmChannel c) => new()
     {
