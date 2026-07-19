@@ -1,15 +1,12 @@
 # Phosphor.Plugins.SoundCloud
 
-> **⚠️ DISABLED — not deployed.** This plug-in is intentionally **not built into the host's
-> `plugins/` folder** (`DisableSoundCloudPlugin` is `true` in the csproj), so the host never
-> discovers it and it does **not** appear in the source list. The source code is kept for a possible
-> future revisit. **Why:** too much SoundCloud content is DRM-protected — major-label catalog tracks
-> are served only via `cbc-encrypted-hls` / `ctr-encrypted-hls`, which yt-dlp cannot decrypt (they
-> resolve to zero formats). In practice tracks would be skipped constantly, a frustrating jukebox
-> experience. See "Why it's disabled" below and `SOURCE_PLUGIN_CANDIDATES.md`.
->
-> **To re-enable:** set `<DisableSoundCloudPlugin>false</DisableSoundCloudPlugin>` in
-> `Phosphor.Plugins.SoundCloud.csproj` and rebuild — the self-deploy target restores it.
+> **⚠️ EXPERIMENTAL.** Much SoundCloud content (major-label catalog) is **DRM-protected** — served
+> only via `cbc-encrypted-hls` / `ctr-encrypted-hls`, which yt-dlp cannot decrypt (they resolve to
+> zero formats). Rather than hide the source, this plug-in advertises itself as **experimental**
+> (`IExperimental`, shown as a badge in the Plug-ins settings tab) and does **lazy discovery**: it
+> remembers tracks that fail to resolve and surfaces them as **unplayable** on future searches instead
+> of letting you hit dead play buttons. Indie/creator uploads and Go+ HQ transcodings generally play
+> fine. See "Lazy discovery & unplayable tracks" below.
 
 A source plug-in that browses and plays **SoundCloud** audio tracks. Loaded dynamically from the
 host's `plugins/SoundCloud/` folder; references only the `Phosphor.Plugin.Abstractions` contract
@@ -46,6 +43,9 @@ Dailymotion (which has a keyless REST API), SoundCloud has **no keyless public A
 - `IPlayableResolver` + `IDeferredStreamResolution` — resolves an audio stream lazily **at play
   time** (one yt-dlp probe on play, not one per row) so browse/search stay fast.
 - `IConnectionTestable` — checks yt-dlp availability and SoundCloud reachability.
+- `IExperimental` (on the provider) — flags the source as experimental so the host shows a badge.
+- `IPlaybackReportable` — lets the host report a play-time failure back so the plug-in can remember
+  definitively-unplayable (DRM/no-formats) tracks. Transient failures are ignored for persistence.
 
 ## Settings
 
@@ -55,36 +55,65 @@ Dailymotion (which has a keyless REST API), SoundCloud has **no keyless public A
 
 Multi-instance: add several SoundCloud tiles if you want more than one.
 
+## Lazy discovery & unplayable tracks
+
+Much SoundCloud content is DRM-protected: a large share of mainstream/major-label catalog (RCA,
+Atlantic, …) is served **only** via `cbc-encrypted-hls` / `ctr-encrypted-hls` (Widevine). yt-dlp
+filters those transcodings out and returns **zero formats**, so the track can't be resolved.
+
+yt-dlp's fast search (`scsearch … --flat-playlist`) does **not** expose DRM/availability, so the only
+cheap signal is a failed resolve. The plug-in turns that into **lazy discovery**:
+
+- **On a play-time failure** the host calls `ReportPlaybackFailure(id, kind)`. A **definitive**
+  failure (DRM / no formats — recognized from yt-dlp's stderr) adds the id to a persisted
+  **unplayable set** (`unplayable.json` in the instance cache); a **transient** failure (network /
+  timeout) is counted but never marks the track.
+- **On future search/browse**, any result whose id is in the unplayable set is surfaced with
+  `SourceItem.IsPlayable = false`, so the host renders it as an **unplayable row** (action buttons
+  removed, a 🚫 indicator shown) rather than hiding it — you still see it exists, you just can't play it.
+- **When a track fails while playing from the queue**, the current row flips to unplayable live and
+  the host auto-skips to the next queued track.
+
+### Diagnostic stats (dev-only)
+
+`unplayable.json` also carries lightweight counters — `Attempts`, `Successes`, `Failures`,
+`DefinitiveFailures`, `TransientFailures` — purely to gauge how much SoundCloud content actually
+resolves versus fails. Not surfaced in the UI.
+
+### Future: active discovery (not implemented)
+
+Lazy discovery only learns after a failed play. A more thorough (but slower, more invasive) approach
+would **pre-filter at search time** by doing a full yt-dlp extraction per result and dropping
+preview/DRM formats, e.g.:
+
+```sh
+# Fast but too thin to filter on availability/format:
+yt-dlp "scsearch50:query" --flat-playlist -j > results.jsonl
+
+# Slower but gives the real fields to filter/inspect:
+yt-dlp "scsearch50:query" -j --no-download > results.jsonl
+jq -c 'select(.format_id | test("preview") | not)' results.jsonl
+```
+
+This runs one full extraction per row (defeating the deferred design) so it isn't used; it's noted
+as a possible opt-in "active discovery" mode. The cleanest fix remains the official SoundCloud API's
+`access=playable` filter (excludes DRM/paywalled/geo-blocked **server-side**), but that needs a paid
+Artist Pro account + `client_id`/`client_secret` + OAuth — a much higher bar than the keyless default.
+
 ## Limitations
 
 - **Audio-only** (SoundCloud has no video).
-- **Preview-only / DRM-protected** tracks cannot be resolved (no raw stream URL) — yt-dlp reports
-  these and the item is skipped at play time.
+- **Preview-only / DRM-protected** tracks cannot be resolved — surfaced as unplayable (see above).
 - Genre browse is search-backed (SoundCloud exposes no keyless charts/catalog API), so a feed is
   "top search results for the genre", not an editorial chart.
-
-## Why it's disabled
-
-The DRM limitation above turned out to dominate real-world use, not be an edge case. A large share of
-mainstream/major-label catalog (RCA, Atlantic, etc.) is served **only** via SoundCloud's
-`cbc-encrypted-hls` / `ctr-encrypted-hls` (Widevine) protocols. yt-dlp filters those transcodings out
-and returns **zero formats**, so the track can't be resolved and the host auto-skips it. Across
-typical searches enough results are DRM-protected that the jukebox would skip tracks constantly —
-frustrating enough that we disabled the plug-in rather than ship that experience.
-
-The clean fix would be the **official SoundCloud API's `access=playable`** search filter, which
-excludes DRM/paywalled/geo-blocked tracks **server-side** so they never appear. But that API is not
-keyless: it requires a **paid Artist Pro account**, a registered app with a `client_id` +
-`client_secret`, and an OAuth 2.1 token lifecycle — a much higher onboarding bar than any other
-source. That's the natural shape of a future revisit (an **optional-credentials hybrid**: keyless
-yt-dlp by default, official-API discovery with `access=playable` when a user supplies credentials),
-tracked as a follow-up rather than built now.
+- Lazy discovery only flags a track **after** it has failed once; the very first attempt on a
+  DRM track still fails (and is then remembered).
 
 ## Follow-ups (deferred)
 
 - **Optional-credentials hybrid** — official-API discovery with `access=playable` (DRM-free results)
-  when a user supplies a `client_id`/`client_secret`, falling back to keyless yt-dlp otherwise. This
-  is the path to re-enabling the plug-in with a good experience.
+  when a user supplies a `client_id`/`client_secret`, falling back to keyless yt-dlp otherwise.
+- **Active discovery** — opt-in full-extraction pre-filter at search time (see above).
 - **Paged browse** — genre feeds and search return a single window (up to 100); lazy "load more"
   (`IPagedBrowsable`) is a natural follow-on.
 - `IGaplessCapable` — SoundCloud URLs are short-lived HLS, so gapless priming is deferred.

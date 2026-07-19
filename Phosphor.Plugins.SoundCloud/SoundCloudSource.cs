@@ -24,7 +24,7 @@ internal sealed record ScFavorite(
 /// </summary>
 public sealed class SoundCloudSource :
     IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver,
-    IDeferredStreamResolution, IFavoritable, IConnectionTestable
+    IDeferredStreamResolution, IFavoritable, IConnectionTestable, IPlaybackReportable
 {
     // Curated genre feeds. SoundCloud has no keyless catalog API, so each is a canned scsearch term.
     private static readonly (string Title, string Query)[] Genres =
@@ -57,6 +57,11 @@ public sealed class SoundCloudSource :
     private Dictionary<string, ScFavorite> _favorites = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ScTrack> _seen = new(StringComparer.Ordinal);
 
+    // Lazy discovery: ids known to be unplayable (DRM/no-formats), learned from play-time failures.
+    private HashSet<string> _unplayable = new(StringComparer.Ordinal);
+    // Diagnostic play/fail stats (dev-only), persisted alongside the unplayable set.
+    private ScStats _stats = new();
+
     public SoundCloudSource(string instanceId, IReadOnlyDictionary<string, string?> settings)
     {
         InstanceId = instanceId;
@@ -77,6 +82,7 @@ public sealed class SoundCloudSource :
         _host = host;
         EnsureResolver();
         _favorites = LoadFavorites();
+        LoadUnplayable();
         return Task.CompletedTask;
     }
 
@@ -193,6 +199,7 @@ public sealed class SoundCloudSource :
             ThumbnailUrl = f.ThumbnailUrl,
             Duration = f.DurationSeconds is { } s ? TimeSpan.FromSeconds(s) : null,
             IsAudioOnly = true,
+            IsPlayable = IsPlayableId(f.Id),
             SourceState = new ScState(f.Url),
         }).ToList();
         return new BrowseResult { Items = items };
@@ -242,7 +249,18 @@ public sealed class SoundCloudSource :
         if (_resolver is null) return null;
         var url = UrlOf(item);
         if (url is null) return null;
-        return await _resolver.ResolveAsync(url, prefs, ct);
+
+        var (stream, definitive) = await _resolver.ResolveWithDiagnosisAsync(url, prefs, ct);
+        if (stream is not null)
+        {
+            RecordOutcome(item.ItemId, success: true, definitiveFailure: false);
+            return stream;
+        }
+
+        // Failed. Record it; a definitive failure (DRM/no-formats) also marks the id unplayable so it
+        // surfaces as such on future searches (lazy discovery). Transient failures are counted only.
+        RecordOutcome(item.ItemId, success: false, definitiveFailure: definitive);
+        return null;
     }
 
     public async Task<SourceMetadata?> GetMetadataAsync(SourceItem item, CancellationToken ct = default)
@@ -340,6 +358,89 @@ public sealed class SoundCloudSource :
         }
     }
 
+    // ── Lazy unplayable discovery + diagnostic stats ──────────────────────────────
+
+    /// <summary>
+    /// Host callback (IPlaybackReportable): a track failed to play. We persist only definitive
+    /// (Unresolvable) failures as known-unplayable — transient failures (network/timeout) are counted
+    /// but never mark a track permanently bad. Returns whether the id is now known-unplayable.
+    /// </summary>
+    public bool ReportPlaybackFailure(string itemId, PlaybackFailureKind kind)
+    {
+        if (string.IsNullOrEmpty(itemId)) return false;
+        bool definitive = kind == PlaybackFailureKind.Unresolvable;
+        RecordOutcome(itemId, success: false, definitiveFailure: definitive);
+        lock (_gate) return _unplayable.Contains(itemId);
+    }
+
+    // Central place all resolve/play outcomes flow through: updates diagnostic stats and, for a
+    // definitive failure, adds the id to the persisted unplayable set. Persists every outcome (stats
+    // always change).
+    private void RecordOutcome(string itemId, bool success, bool definitiveFailure)
+    {
+        lock (_gate)
+        {
+            _stats.Attempts++;
+            if (success)
+            {
+                _stats.Successes++;
+            }
+            else
+            {
+                _stats.Failures++;
+                if (definitiveFailure)
+                {
+                    _stats.DefinitiveFailures++;
+                    if (!string.IsNullOrEmpty(itemId)) _unplayable.Add(itemId);
+                }
+                else
+                {
+                    _stats.TransientFailures++;
+                }
+            }
+            SaveUnplayable();
+        }
+    }
+
+    private string UnplayablePath =>
+        Path.Combine(_host?.InstanceCacheDirectory ?? Path.GetTempPath(), "unplayable.json");
+
+    private void LoadUnplayable()
+    {
+        try
+        {
+            var path = UnplayablePath;
+            if (!File.Exists(path)) return;
+            var doc = JsonSerializer.Deserialize<UnplayableDoc>(File.ReadAllText(path));
+            if (doc is null) return;
+            lock (_gate)
+            {
+                _unplayable = new HashSet<string>(doc.Ids ?? [], StringComparer.Ordinal);
+                _stats = doc.Stats ?? new ScStats();
+            }
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"SoundCloud: unplayable read failed: {ex.Message}");
+        }
+    }
+
+    // Caller holds _gate.
+    private void SaveUnplayable()
+    {
+        try
+        {
+            var path = UnplayablePath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var doc = new UnplayableDoc { Ids = _unplayable.ToList(), Stats = _stats };
+            File.WriteAllText(path, JsonSerializer.Serialize(doc));
+        }
+        catch (Exception ex)
+        {
+            _host?.Log($"SoundCloud: unplayable write failed: {ex.Message}");
+        }
+    }
+
     private static string? UrlOf(SourceItem item) =>
         item.SourceState is ScState s ? s.Url : null;
 
@@ -355,8 +456,14 @@ public sealed class SoundCloudSource :
             ThumbnailUrl = t.ThumbnailUrl,
             Duration = t.Duration,
             IsAudioOnly = true,
+            IsPlayable = IsPlayableId(t.Id),
             SourceState = new ScState(t.Url),
         };
+    }
+
+    private bool IsPlayableId(string id)
+    {
+        lock (_gate) return !_unplayable.Contains(id);
     }
 
     private static string? Get(IReadOnlyDictionary<string, string?> values, string key) =>

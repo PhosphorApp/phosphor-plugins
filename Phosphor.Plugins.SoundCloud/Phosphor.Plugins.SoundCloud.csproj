@@ -20,13 +20,13 @@
 	<IsPackable>false</IsPackable>
 	<EnableDynamicLoading>true</EnableDynamicLoading>
 	<!--
-	  DISABLED: too much SoundCloud content is DRM-protected (major-label catalog served only via
-	  cbc/ctr-encrypted-hls, unplayable through yt-dlp), so tracks would be skipped constantly. The
-	  source code is kept for a possible future revisit (e.g. an optional-credentials hybrid using the
-	  official API's access=playable filter). When disabled, the plug-in is NOT deployed into the
-	  host's plugins/ folder, so the host never discovers it. Flip to false to re-enable deployment.
+	  EXPERIMENTAL: much SoundCloud content (major-label catalog) is DRM-protected and unplayable
+	  through yt-dlp. Rather than hide the source, the plug-in advertises itself as experimental
+	  (IExperimental) and does "lazy discovery": it remembers tracks that fail to resolve
+	  (IPlaybackReportable) and surfaces them as unplayable (SourceItem.IsPlayable = false) on future
+	  searches. Set DisableSoundCloudPlugin to true to stop deploying it into the host's plugins/ folder.
 	-->
-	<DisableSoundCloudPlugin>true</DisableSoundCloudPlugin>
+	<DisableSoundCloudPlugin>false</DisableSoundCloudPlugin>
   </PropertyGroup>
 
   <ItemGroup>

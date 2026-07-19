@@ -8,7 +8,7 @@ namespace Phosphor.Plugins.SoundCloud;
 /// auto-derives a client_id), and resolves audio playback through the same host-bundled yt-dlp.
 /// Users pin tracks with the star toggle (IFavoritable). Multi-instance.
 /// </summary>
-public sealed class SoundCloudSourceProvider : IPhosphorSourceProvider
+public sealed class SoundCloudSourceProvider : IPhosphorSourceProvider, IExperimental
 {
     public const string SoundCloudTypeId = "soundcloud";
 

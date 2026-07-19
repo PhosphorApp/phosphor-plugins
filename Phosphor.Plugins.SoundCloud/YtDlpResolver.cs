@@ -97,6 +97,18 @@ internal sealed class YtDlpResolver(string ytDlpPath, Action<string>? log = null
     public async Task<ResolvedStream?> ResolveAsync(
         string url, PlaybackPreferences prefs, CancellationToken ct = default)
     {
+        var (stream, _) = await ResolveWithDiagnosisAsync(url, prefs, ct);
+        return stream;
+    }
+
+    /// <summary>
+    /// Like <see cref="ResolveAsync"/> but also reports whether a failure was <em>definitive</em>
+    /// (the track is intrinsically unplayable, e.g. DRM-protected / zero formats) versus transient
+    /// (network/timeout). Lets the source persist only definitive failures as known-unplayable.
+    /// </summary>
+    public async Task<(ResolvedStream? stream, bool definitiveFailure)> ResolveWithDiagnosisAsync(
+        string url, PlaybackPreferences prefs, CancellationToken ct = default)
+    {
         var sw = Stopwatch.StartNew();
 
         // SoundCloud is audio-only. Prefer a stereo (2.1) track when requested — pinball cabs route
@@ -107,11 +119,26 @@ internal sealed class YtDlpResolver(string ytDlpPath, Action<string>? log = null
         var audioUrl = FirstNonEmptyLine(stdout);
         if (code != 0 || audioUrl is null)
         {
-            _log?.Invoke($"SoundCloud resolve failed ({code}) in {sw.ElapsedMilliseconds}ms: {Trim(stderr, 200)}");
-            return null;
+            // yt-dlp reports DRM-protected / no-formats tracks with a recognizable error. These are
+            // intrinsic to the track and will never resolve — flag as a definitive failure so the
+            // source can remember them; anything else (network, timeout) stays transient.
+            var definitive = IsDefinitiveFailure(stderr);
+            _log?.Invoke($"SoundCloud resolve failed ({code}, definitive={definitive}) in {sw.ElapsedMilliseconds}ms: {Trim(stderr, 200)}");
+            return (null, definitive);
         }
         _log?.Invoke($"SoundCloud resolved audio in {sw.ElapsedMilliseconds}ms: {url}");
-        return new ResolvedStream(StreamTransport.Http, StreamLayout.AudioOnly, audioUrl);
+        return (new ResolvedStream(StreamTransport.Http, StreamLayout.AudioOnly, audioUrl), false);
+    }
+
+    // Recognizes yt-dlp errors that mean the track can never be resolved (not a transient blip).
+    private static bool IsDefinitiveFailure(string stderr)
+    {
+        if (string.IsNullOrEmpty(stderr)) return false;
+        return stderr.Contains("DRM", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("no formats", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("only available for", StringComparison.OrdinalIgnoreCase)   // Go+ / premium
+            || stderr.Contains("This track is not available", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<SourceMetadata?> GetMetadataAsync(string url, CancellationToken ct = default)
@@ -146,6 +173,15 @@ internal sealed class YtDlpResolver(string ytDlpPath, Action<string>? log = null
             StandardOutputEncoding = System.Text.Encoding.UTF8,
             StandardErrorEncoding = System.Text.Encoding.UTF8,
         };
+        // yt-dlp is a Python app; when its stdout is redirected (not a console) Python defaults to the
+        // system locale encoding, mangling non-ASCII titles (e.g. Vietnamese) into replacement chars.
+        // Force UTF-8 both via yt-dlp's own --encoding flag (added below) and Python's IO encoding so
+        // the bytes match how we decode above.
+        psi.Environment["PYTHONIOENCODING"] = "utf-8";
+        psi.Environment["PYTHONUTF8"] = "1";
+        // Prepend --encoding utf-8 so every invocation emits UTF-8 regardless of the caller's args.
+        psi.ArgumentList.Add("--encoding");
+        psi.ArgumentList.Add("utf-8");
         foreach (var a in args) psi.ArgumentList.Add(a);
 
         try
