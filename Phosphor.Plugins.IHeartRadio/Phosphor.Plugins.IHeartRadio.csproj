@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+	Phosphor.Plugins.IHeartRadio
+	A source plug-in that streams iHeartRadio live radio stations. Loaded dynamically by the host
+	from its plugins/ folder — there is deliberately NO project reference from the host back to this
+	project. It references ONLY the Phosphor plug-in contract, compile-only (the host supplies the
+	single shared runtime copy).
+
+	Playback design (LEAN — no proxy, no auth, no yt-dlp): iHeart's public REST API
+	(api.iheart.com) returns a station's raw, NON-DRM HLS master URL directly (proven in
+	tools/IHeartRadioSpike). ResolveAsync just hands that https://…/hls.m3u8 URL to the host's
+	existing StreamUrl -> new Media -> Play path. Stations are live radio, so items/streams are
+	marked IsLiveStream (no seek/duration/auto-advance) — the same host path SiriusXM uses, but
+	without the AES decrypt proxy or subscriber login.
+  -->
+  <PropertyGroup>
+	<TargetFramework>net8.0</TargetFramework>
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+	<AssemblyName>Phosphor.Plugins.IHeartRadio</AssemblyName>
+	<RootNamespace>Phosphor.Plugins.IHeartRadio</RootNamespace>
+	<Version>1.0.0</Version>
+	<IsPackable>false</IsPackable>
+	<EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<!--
+	  Compile-only reference to the contract: the host owns the single runtime copy so contract
+	  types unify across the load boundary (Private=false / ExcludeAssets=runtime).
+	-->
+	<ProjectReference Include="..\Phosphor.Plugin.Abstractions\Phosphor.Plugin.Abstractions.csproj">
+	  <Private>false</Private>
+	  <ExcludeAssets>runtime</ExcludeAssets>
+	</ProjectReference>
+  </ItemGroup>
+
+  <!--
+	Self-deploy: copy this plug-in's output into the host's plugins/IHeartRadio/ folder whenever THIS
+	project builds. This inverts the dependency (the plug-in deploys itself instead of relying on the
+	host's AfterBuild copy), so a plain Build of the plug-in always refreshes the deployed DLL. The
+	shared contract is excluded (the host owns the single runtime copy). Runs unconditionally so
+	incremental builds can't skip it.
+  -->
+  <Target Name="SelfDeployToHost" AfterTargets="Build">
+	<PropertyGroup>
+	  <HostPluginDest>$(MSBuildThisFileDirectory)..\Phosphor\bin\$(Configuration)\net8.0-windows\plugins\IHeartRadio</HostPluginDest>
+	</PropertyGroup>
+	<ItemGroup>
+	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
+	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
+	</ItemGroup>
+	<MakeDir Directories="$(HostPluginDest)" />
+	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
+	<Message Importance="high" Text="IHeartRadio plug-in self-deployed to $(HostPluginDest)" />
+  </Target>
+
+</Project>
