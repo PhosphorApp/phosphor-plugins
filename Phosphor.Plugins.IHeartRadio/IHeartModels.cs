@@ -37,6 +37,13 @@ public sealed record IHeartPodcast(
 /// A single podcast episode. Unlike live stations these are <b>finite, seekable</b> tracks with a
 /// real <see cref="Duration"/>. <see cref="MediaUrl"/> is a direct, non-DRM MP3 (resolved from
 /// <c>/api/v3/podcast/episodes/{Id}</c>) that LibVLC plays directly.
+/// <para>
+/// <see cref="HasVideo"/> reflects the episode's <c>mimeTypes</c> array: a show flagged as a "video
+/// podcast" advertises <c>video/mp4</c> alongside <c>audio/mpeg</c>. This is a <b>per-episode</b>
+/// signal — even within a video show some episodes are audio-only. <b>Note:</b> the public
+/// key-less API still only hands back the audio <c>mediaUrl</c> on resolve, so this flag is currently
+/// informational (grounding for future video-playback work), not yet a playable video source.
+/// </para>
 /// </summary>
 public sealed record IHeartEpisode(
     string Id,
@@ -44,7 +51,8 @@ public sealed record IHeartEpisode(
     string? Description,
     string? ImageUrl,
     TimeSpan? Duration,
-    string? MediaUrl);
+    string? MediaUrl,
+    bool HasVideo = false);
 
 /// <summary>What kind of thing a favorite is, so it rebuilds/plays correctly.</summary>
 public enum IHeartFavoriteKind

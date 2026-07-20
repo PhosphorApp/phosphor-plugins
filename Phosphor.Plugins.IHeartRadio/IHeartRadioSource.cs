@@ -281,7 +281,10 @@ public sealed class IHeartRadioSource :
         var (episodes, next) = await Client.GetEpisodePageAsync(node.Key, count, cursor, ct);
         SeedEpisodeCursor(node.Key, offset + episodes.Count, next);
 
-        var items = episodes.Select(ToEpisodeItem).ToList();
+        // The podcast tile's Title is the show name — thread it through so video-capable episodes can
+        // build a "{show} {episode}" YouTube search query for the optional video-upgrade button.
+        var showTitle = category.Title;
+        var items = episodes.Select(e => ToEpisodeItem(e, showTitle)).ToList();
         // Report a total that keeps "load more" alive while a next cursor exists, and closes it out
         // (offset + count == total) when the podcast is exhausted.
         var total = next is null ? offset + items.Count : offset + items.Count + 1;
@@ -373,7 +376,7 @@ public sealed class IHeartRadioSource :
     };
 
     // Podcast episodes are FINITE, seekable tracks (not live) — carry a Duration and no IsLiveStream.
-    private SourceItem ToEpisodeItem(IHeartEpisode e) => new()
+    private SourceItem ToEpisodeItem(IHeartEpisode e, string? showTitle = null) => new()
     {
         SourceInstanceId = InstanceId,
         ItemId = e.Id,
@@ -382,9 +385,19 @@ public sealed class IHeartRadioSource :
         ThumbnailUrl = e.ImageUrl,
         IsAudioOnly = true,
         Duration = e.Duration,
+        // Video podcasts serve audio inline but a video version usually lives on YouTube — flag the
+        // episode and supply a best-effort search query so the host can offer an optional video upgrade.
+        HasVideoAlternative = e.HasVideo,
+        VideoSearchQuery = e.HasVideo ? BuildVideoQuery(showTitle, e.Title) : null,
         // Carry the episode so ResolveAsync can reuse an inline media URL when present.
         SourceState = e,
     };
+
+    // Build the YouTube search query for a video-podcast episode: quote the show name (forces an exact
+    // phrase) followed by the episode title, e.g. "Joy 101 with Hoda Kotb" Episode 12. Falls back to
+    // the episode title alone when the show name is unknown.
+    private static string BuildVideoQuery(string? showTitle, string episodeTitle) =>
+        string.IsNullOrWhiteSpace(showTitle) ? episodeTitle : $"\"{showTitle}\" {episodeTitle}";
 
     // ── IFavoritable / IFavoriteCapture ─────────────────────────────────────────
 

@@ -258,7 +258,23 @@ public sealed class IHeartClient
         var image = e.TryGetProperty("imageUrl", out var im) ? im.GetString() : null;
         TimeSpan? duration = e.TryGetProperty("duration", out var du) && du.TryGetInt32(out var secs) && secs > 0
             ? TimeSpan.FromSeconds(secs) : null;
-        return new IHeartEpisode(id, title!, desc, image, duration, mediaUrl);
+        return new IHeartEpisode(id, title!, desc, image, duration, mediaUrl, HasVideo: HasVideo(e));
+    }
+
+    // Whether the episode advertises a video rendition. iHeart episodes carry a "mimeTypes" array;
+    // "video podcast" episodes list "video/mp4" alongside "audio/mpeg". This is a per-episode signal
+    // (audio-only episodes appear even inside video shows). Informational only for now — the public
+    // resolve endpoint still returns the audio mediaUrl regardless (see README).
+    private static bool HasVideo(JsonElement e)
+    {
+        if (!e.TryGetProperty("mimeTypes", out var mimes) || mimes.ValueKind != JsonValueKind.Array)
+            return false;
+        foreach (var m in mimes.EnumerateArray())
+            if (m.ValueKind == JsonValueKind.String
+                && m.GetString() is { } s
+                && s.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
     }
 
     private async Task<JsonElement?> GetAsync(string path, CancellationToken ct)

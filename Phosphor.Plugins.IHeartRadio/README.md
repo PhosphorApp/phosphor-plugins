@@ -99,3 +99,41 @@ Building this project self-deploys its output to
 - Unofficial API (no formal dev program) so endpoints could shift.
 - Genre / podcast-category lists are fetched once per session (no on-disk cache — they're small and
   cheap). Episode paging is cursor-based and sequential (no random-access offsets).
+
+### Video podcasts (detected, not yet playable)
+
+iHeart has a **"Video Podcasts"** category (site category id `278`); its shows advertise a video
+rendition. Each episode's JSON carries a **`mimeTypes`** array, and video episodes list `video/mp4`
+alongside `audio/mpeg`:
+
+- Audio-only: `"mimeTypes": ["audio/mpeg"]`
+- Has video:  `"mimeTypes": ["audio/mpeg", "video/mp4"]`
+
+`IHeartEpisode.HasVideo` is set from this array (`ParseEpisode` → `HasVideo`). It is a **per-episode**
+signal — even inside a "video" show some episodes are audio-only, so the flag is set per episode, not
+per show.
+
+**Why it's detection-only for now:** the public, key-less resolve endpoint
+(`GET /api/v3/podcast/episodes/{id}`) still returns only the **audio** `mediaUrl` even when
+`mimeTypes` includes `video/mp4`. Probing obvious variants (`?includeVideo=true`, `?format=video`,
+`/stream`) did not surface an mp4 URL — the app appears to fetch the video rendition via a different
+(likely authenticated / omny-specific) path. Some shows also just point at YouTube in their
+description. So `HasVideo` is currently **informational** — it grounds future video-playback work but
+does not yet change resolution/playback.
+
+### Optional "watch video" (📺) button
+
+Rather than block on iHeart's own video URL, video-capable episodes get an **optional** upgrade path
+that leans on YouTube (where these shows almost always post the video version). It is deliberately a
+*second* action — the default Play button always plays the guaranteed iHeart **audio**:
+
+- On browse, `ToEpisodeItem` sets `SourceItem.HasVideoAlternative` (from `IHeartEpisode.HasVideo`) and
+  a best-effort `SourceItem.VideoSearchQuery` of the form `"{show name}" {episode title}` (the show
+  name is threaded in from the podcast tile's title). The host mirrors both onto its `VideoItem`.
+- The host renders a **📺** button on such rows (`PlayVideoAlternativeCommand`). Pressing it runs a
+  **first-match** YouTube search (approximating yt-dlp's `ytsearch1`) from `VideoSearchQuery`; on a hit
+  it plays the video, and on a miss (or no YouTube source) it **silently falls back** to the episode's
+  audio. Not guaranteed — that's exactly why it's optional and audio stays the default.
+
+A small manual test found every video-podcast episode had a matching YouTube upload, but the match is
+best-effort (the quoted show name biases toward the right channel). No extra search page is shown.
