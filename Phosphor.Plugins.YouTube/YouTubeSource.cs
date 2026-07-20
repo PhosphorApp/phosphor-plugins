@@ -21,7 +21,7 @@ namespace Phosphor.Plugins.YouTube;
 /// </remarks>
 public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable
 {
-    private readonly HttpClient? _http;
+    private HttpClient? _http;
     private static readonly HttpClient _sharedHttp = new() { Timeout = TimeSpan.FromSeconds(15) };
     private IPluginHost? _host;
 
@@ -33,12 +33,12 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     private ISearchEngine _search;
     private IVideoEngine _video;
 
-    public YouTubeSource(string instanceId, IReadOnlyDictionary<string, string?> settings, HttpClient? http = null)
+    public YouTubeSource(string instanceId, IReadOnlyDictionary<string, string?> settings)
     {
         InstanceId = instanceId;
-        _http = http;
+        // Engines are built here with no host HttpClient yet; InitializeAsync adopts the host's
+        // shared client and rebuilds the search engine so the configured network timeout applies.
         ApplySettingsInternal(settings);
-        // ApplySettingsInternal builds the engines; the fields are assigned there.
         _search ??= SearchEngineFactory.Create(_searchKind, _http);
         _video ??= VideoEngineFactory.Create(_videoKind);
     }
@@ -55,6 +55,11 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     public Task InitializeAsync(IPluginHost host, CancellationToken ct = default)
     {
         _host = host;
+        // Adopt the host's shared HttpClient so its connection pooling and configured network
+        // timeout apply to YouTube discovery. The search engine is the http consumer — rebuild it
+        // with the host client (the video engine's yt-dlp/YoutubeExplode paths don't take it).
+        _http = host.HttpClient;
+        _search = SearchEngineFactory.Create(_searchKind, _http);
         return Task.CompletedTask;
     }
 
