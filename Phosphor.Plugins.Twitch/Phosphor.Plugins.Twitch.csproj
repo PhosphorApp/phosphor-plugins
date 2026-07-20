@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+	Phosphor.Plugins.Twitch
+	A source plug-in that browses and plays Twitch content. Loaded dynamically from the host's
+	plugins/ folder — no project reference from the host back to this project. References ONLY the
+	Phosphor plug-in contract, compile-only (the host supplies the single shared runtime copy).
+
+	Like Dailymotion it reuses the host-bundled yt-dlp for playback (mature twitch:* extractors) and
+	discovery is KEYLESS: Twitch's public GraphQL endpoint (gql.twitch.tv) answers search / channel /
+	directory queries with the well-known anonymous web Client-ID — no OAuth, no account, no token.
+	Twitch is live-first, so live streams flow through the host's IsLiveStream path; VODs are finite
+	and seekable.
+  -->
+  <PropertyGroup>
+	<TargetFramework>net8.0</TargetFramework>
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+	<AssemblyName>Phosphor.Plugins.Twitch</AssemblyName>
+	<RootNamespace>Phosphor.Plugins.Twitch</RootNamespace>
+	<Version>1.0.0</Version>
+	<IsPackable>false</IsPackable>
+	<EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<ProjectReference Include="..\Phosphor.Plugin.Abstractions\Phosphor.Plugin.Abstractions.csproj">
+	  <Private>false</Private>
+	  <ExcludeAssets>runtime</ExcludeAssets>
+	</ProjectReference>
+  </ItemGroup>
+
+  <!-- Self-deploy into the host's plugins/Twitch/ folder on build (mirrors Dailymotion/Vimeo). -->
+  <Target Name="SelfDeployToHost" AfterTargets="Build">
+	<PropertyGroup>
+	  <HostPluginDest>$(MSBuildThisFileDirectory)..\Phosphor\bin\$(Configuration)\net8.0-windows\plugins\Twitch</HostPluginDest>
+	</PropertyGroup>
+	<ItemGroup>
+	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
+	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
+	</ItemGroup>
+	<MakeDir Directories="$(HostPluginDest)" />
+	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
+	<Message Importance="high" Text="Twitch plug-in self-deployed to $(HostPluginDest)" />
+  </Target>
+
+</Project>
