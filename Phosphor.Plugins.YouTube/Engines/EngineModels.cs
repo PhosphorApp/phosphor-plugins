@@ -1,0 +1,28 @@
+namespace Phosphor;
+
+/// <summary>
+/// Lightweight plug-in-internal video result produced by the YouTube search/discovery engines
+/// and mapped straight to the plug-in contract's <c>SourceItem</c> by <c>YouTubeMappings</c>.
+/// This is a trimmed copy of the fields the engines actually populate — the plug-in never
+/// references the host's rich MVVM <c>VideoItem</c> (which lives across the load boundary).
+/// </summary>
+public sealed class VideoItem
+{
+    public string Title { get; set; } = "";
+    public string Author { get; set; } = "";
+    public string ThumbnailUrl { get; set; } = "";
+    public string VideoId { get; set; } = "";
+    public TimeSpan? Duration { get; set; }
+    public DateTimeOffset? UploadDate { get; set; }
+}
+
+/// <summary>
+/// Plug-in-internal chapter marker used by the video engines' metadata results. Mapped to the
+/// contract's <c>ChapterMarker</c> by <c>YouTubeMappings</c>.
+/// </summary>
+public sealed class ChapterMarker
+{
+    public string Title { get; set; } = "";
+    public TimeSpan StartTime { get; set; }
+    public TimeSpan EndTime { get; set; }
+}
