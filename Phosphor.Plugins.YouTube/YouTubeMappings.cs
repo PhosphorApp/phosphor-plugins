@@ -71,15 +71,57 @@ internal static class YouTubeMappings
 
     // ── Metadata ───────────────────────────────────────────────────────────────
 
-    /// <summary>Maps host <see cref="VideoMetadata"/> to plug-in <see cref="SourceMetadata"/>.</summary>
-    public static SourceMetadata ToSourceMetadata(VideoMetadata m) => new(
-        m.Duration,
-        m.Description,
-        m.Chapters.Select(ToPluginChapter).ToList(),
-        m.UploadDate);
+    /// <summary>
+    /// Maps host <see cref="VideoMetadata"/> to plug-in <see cref="SourceMetadata"/>. When the
+    /// engine reported no native chapters, YouTube-style chapters are parsed from the description
+    /// here so the host receives ready-to-use markers (the host no longer parses descriptions).
+    /// </summary>
+    public static SourceMetadata ToSourceMetadata(VideoMetadata m)
+    {
+        var chapters = m.Chapters.Count > 0
+            ? m.Chapters.Select(ToPluginChapter).ToList()
+            : ParseChaptersFromDescription(m.Description ?? "", m.Duration);
+        return new SourceMetadata(m.Duration, m.Description, chapters, m.UploadDate);
+    }
 
     private static PluginChapterMarker ToPluginChapter(Phosphor.ChapterMarker c) =>
         new(c.Title, c.StartTime, c.EndTime);
+
+    /// <summary>
+    /// Parses chapter markers from a YouTube video description. Looks for lines starting with
+    /// timestamps like "0:00", "1:23:45", etc. Relocated from the host so YouTube-specific parsing
+    /// lives with the YouTube source.
+    /// </summary>
+    private static List<PluginChapterMarker> ParseChaptersFromDescription(string description, TimeSpan? totalDuration)
+    {
+        var chapters = new List<PluginChapterMarker>();
+        if (string.IsNullOrWhiteSpace(description)) return chapters;
+
+        var regex = new System.Text.RegularExpressions.Regex(
+            @"(?:^|\()\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*(?:\)?\s*[-–—]?\s*)(.+)",
+            System.Text.RegularExpressions.RegexOptions.Multiline);
+
+        var starts = new List<TimeSpan>();
+        var titles = new List<string>();
+        foreach (System.Text.RegularExpressions.Match match in regex.Matches(description))
+        {
+            var timeParts = match.Groups[1].Value.Split(':');
+            TimeSpan ts = timeParts.Length == 3
+                ? new TimeSpan(int.Parse(timeParts[0]), int.Parse(timeParts[1]), int.Parse(timeParts[2]))
+                : new TimeSpan(0, int.Parse(timeParts[0]), int.Parse(timeParts[1]));
+            starts.Add(ts);
+            titles.Add(match.Groups[2].Value.Trim());
+        }
+
+        for (int i = 0; i < starts.Count; i++)
+        {
+            var end = i < starts.Count - 1 ? starts[i + 1]
+                : (totalDuration ?? TimeSpan.Zero);
+            chapters.Add(new PluginChapterMarker(titles[i], starts[i], end));
+        }
+
+        return chapters;
+    }
 
     // ── Preferences ────────────────────────────────────────────────────────────
 
