@@ -19,9 +19,15 @@ A source plug-in that browses and plays **Twitch** content. Loaded dynamically f
 	paged.
   - **Top Live** — Twitch's current top live streams, **paged** (scroll to "load more").
 - **Search: the host search box** queries Twitch's live channels.
-- **Favorites: pin items with the star.** Star any stream or VOD (via `IFavoritable`) to pin it to the
-  **Favorites** node. Favorites are stored per-instance in `favorites.json` with enough metadata
-  (title, thumbnail, duration, URL, live flag) to render instantly/offline.
+- **Favorites: pin the *channel* with the star.** Twitch VODs expire quickly (days–weeks), so the
+  star always favorites the **channel**, never a specific video id. Star any row — a live stream OR a
+  VOD — and its owning channel is pinned to the **Favorites** node (and every other row from that
+  channel shows starred too, for a consistent view). Favorites are stored per-instance in
+  `favorites.json` keyed by channel login (permanent). A favorited channel appears as a **collection
+  you drill into** (its videos), tagged **● LIVE** when it's currently broadcasting; opening it lists
+  the channel's VODs with the **current live stream injected as the first item** (flagged
+  `IsLiveStream` so the host can badge it). Clicking the channel tile browses — it never tries to play
+  an offline channel.
 - **Playback: bundled yt-dlp.** Streams are resolved by shelling out to the host-bundled `yt-dlp`
   (via `IPluginHost.GetToolPath("yt-dlp")`), reusing yt-dlp's mature Twitch extractors
   (`twitch:stream`, `twitch:vod`). The GQL layer only *finds* content; yt-dlp *resolves* it at play
@@ -37,7 +43,8 @@ A source plug-in that browses and plays **Twitch** content. Loaded dynamically f
 - `IPagedBrowsable` — lazy "load more" for Top Live, per-category live streams, and per-channel VODs
   (Twitch GQL is cursor-based; the source maps the host's offset paging onto forward cursors).
 - `ITextSearchCapable` — Twitch live-channel search.
-- `IFavoritable` — star toggle to pin streams/VODs to Favorites.
+- `IFavoritable` — star toggle that pins the owning **channel** (not the video), keyed by login so it
+  never goes stale as VODs expire; re-checks live/offline on open.
 - `IPlayableResolver` + `IDeferredStreamResolution` — resolves a stream lazily **at play time** (one
   yt-dlp probe on play, not one per row) so browse/search stay fast.
 - `IConnectionTestable` — checks GQL reachability and yt-dlp availability.
@@ -49,6 +56,7 @@ A source plug-in that browses and plays **Twitch** content. Loaded dynamically f
 |---|---|---|
 | `channels` | Text (multiple) | Curated pinball channel logins, one per line (e.g. `deadflip`). A full `twitch.tv/<login>` URL is also accepted and reduced to the login. |
 | `quality` | Enum | `Low` / `Medium` / `High` / `Max` height ceiling. |
+| `liveIndicator` | Bool | Decorate a currently-broadcasting channel's live feed with a red corner dot on its thumbnail (via the source-agnostic `SourceItem.ShowLiveBadge` hint). Default on. |
 
 Ships with a few pinball channels seeded by default (`deadflip`, `buffalopinball`,
 `straightdownthemiddle`, `foxcitiespinball`, `mpt3k`) — edit the list freely. Multi-instance: add

@@ -22,6 +22,9 @@ public sealed class TwitchSourceProvider : IPhosphorSourceProvider, IExperimenta
     /// <summary>Settings key: coarse video quality ceiling.</summary>
     public const string KeyQuality = "quality";
 
+    /// <summary>Settings key: decorate the now-live feed's thumbnail with a red corner dot.</summary>
+    public const string KeyLiveIndicator = "liveIndicator";
+
     /// <summary>
     /// Seed channels the plug-in ships with. Pinball-cabinet-relevant streamers/creators; users edit
     /// the list freely in settings. Kept as logins (the twitch.tv/&lt;login&gt; slug).
@@ -63,6 +66,9 @@ public sealed class TwitchSourceProvider : IPhosphorSourceProvider, IExperimenta
         {
             EnumValues = ["Low", "Medium", "High", "Max"],
         },
+        new(KeyLiveIndicator, "Show live indicator", PluginSettingType.Bool, DefaultValue: "true",
+            HelpText: "Mark currently-broadcasting channels as live — a red dot on the live feed's " +
+                      "thumbnail, and a red ● LIVE tag on live channel tiles (in Favorites and Pinball)."),
     ];
 
     public IPhosphorSource CreateInstance(string instanceId, IReadOnlyDictionary<string, string?> settings)

@@ -19,7 +19,8 @@ public sealed record TwitchVideo(
     TimeSpan? Duration,
     string? ThumbnailUrl,
     string? ChannelName,
-    DateTimeOffset? PublishedAt = null);
+    DateTimeOffset? PublishedAt = null,
+    string? ChannelLogin = null);
 
 /// <summary>One page of a listing: items plus whether more pages remain (GQL is cursor-based).</summary>
 public sealed record TwitchVideoPage(IReadOnlyList<TwitchVideo> Items, bool HasMore, string? Cursor);
@@ -197,10 +198,9 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
             Duration: null,
             ThumbnailUrl: thumb,
             ChannelName: displayName ?? login,
-            PublishedAt: started);
+            PublishedAt: started,
+            ChannelLogin: login);
     }
-
-    /// <summary>Fetches a channel's recent VODs (archives/highlights), paged by cursor.</summary>
     public async Task<TwitchVideoPage> GetChannelVideosPageAsync(
         string login, int limit, string? cursor, CancellationToken ct = default)
     {
@@ -397,7 +397,8 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
             Duration: null,
             ThumbnailUrl: thumb,
             ChannelName: display ?? login,
-            PublishedAt: started);
+            PublishedAt: started,
+            ChannelLogin: login);
     }
 
     private static TwitchVideo? MapVod(JsonElement node, string login)
@@ -406,6 +407,7 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
         if (string.IsNullOrEmpty(id)) return null;
 
         var title = node.TryGetProperty("title", out var t) ? t.GetString() ?? $"VOD {id}" : $"VOD {id}";
+        var ownerLogin = TryGetPath(node, out var ol, "owner", "login") ? ol.GetString() : login;
         var display = TryGetPath(node, out var dn, "owner", "displayName") ? dn.GetString() : login;
         TimeSpan? duration = node.TryGetProperty("lengthSeconds", out var ls) && ls.TryGetInt32(out var secs) && secs > 0
             ? TimeSpan.FromSeconds(secs) : null;
@@ -420,7 +422,8 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
             Duration: duration,
             ThumbnailUrl: thumb,
             ChannelName: display ?? login,
-            PublishedAt: published);
+            PublishedAt: published,
+            ChannelLogin: ownerLogin ?? login);
     }
 
     // ── Small helpers ────────────────────────────────────────────────────────────

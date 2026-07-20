@@ -5,8 +5,9 @@ using Phosphor.Plugin.Abstractions;
 namespace Phosphor.Plugins.Twitch;
 
 // Per-item state so the source never re-derives the canonical URL it resolves via yt-dlp, and knows
-// whether to resolve/flag the stream as live.
-internal sealed record TwState(string Url, bool IsLive);
+// whether to resolve/flag the stream as live. ChannelLogin ties every item (live stream OR VOD) back
+// to its owning channel, which is what favoriting operates on (see below).
+internal sealed record TwState(string Url, bool IsLive, string? ChannelLogin = null);
 
 // Node identity carried in SourceCategory.SourceState. Login is set for Channel/ChannelVods nodes;
 // CategoryName is set for a Category node (the Twitch "game name" its streams are listed under).
@@ -14,9 +15,11 @@ internal sealed record TwNode(TwNodeKind Kind, string? Login = null, string? Cat
 
 internal enum TwNodeKind { Root, Favorites, Pinball, TopLive, ChannelVods, Categories, Category }
 
-// A favorite persisted with enough metadata to render instantly/offline.
-internal sealed record TwFavorite(
-    string Id, string Title, string Url, bool IsLive, double? DurationSeconds, string? ThumbnailUrl);
+// A favorite is always a CHANNEL (keyed by its stable login), never a specific video. Twitch VODs
+// expire quickly (days–weeks), so pinning a video id would go stale; a channel login is permanent.
+// Starring any item — live stream or VOD — favorites its owning channel. Persisted with enough to
+// render the channel row instantly/offline.
+internal sealed record TwFavorite(string Login, string Title, string? ThumbnailUrl);
 
 /// <summary>
 /// Twitch source instance. Browses curated pinball channels, the top live directory, and per-channel
@@ -37,6 +40,7 @@ public sealed class TwitchSource :
     private static readonly string IconLive = char.ConvertFromUtf32(0x1F534);     // red circle
     private static readonly string IconCategories = char.ConvertFromUtf32(0x1F5C2) + char.ConvertFromUtf32(0xFE0F); // card index dividers
     private static readonly string IconCategory = char.ConvertFromUtf32(0x1F4C2); // open folder
+    private static readonly string IconChannel = char.ConvertFromUtf32(0x1F4FA);  // television
 
     private readonly object _gate = new();
 
@@ -46,8 +50,9 @@ public sealed class TwitchSource :
 
     private VideoQuality _quality = VideoQuality.High;
     private List<string> _channels = new();
+    private bool _liveIndicator = true;
 
-    private Dictionary<string, TwFavorite> _favorites = new(StringComparer.Ordinal);
+    private Dictionary<string, TwFavorite> _favorites = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, TwitchVideo> _seen = new(StringComparer.Ordinal);
 
     public TwitchSource(string instanceId, IReadOnlyDictionary<string, string?> settings)
@@ -80,6 +85,8 @@ public sealed class TwitchSource :
     {
         _quality = Enum.TryParse<VideoQuality>(
             Get(values, TwitchSourceProvider.KeyQuality), ignoreCase: true, out var q) ? q : VideoQuality.High;
+
+        _liveIndicator = !bool.TryParse(Get(values, TwitchSourceProvider.KeyLiveIndicator), out var li) || li;
 
         var raw = Get(values, TwitchSourceProvider.KeyChannels);
         var channels = (raw ?? string.Join('\n', TwitchSourceProvider.DefaultChannels))
@@ -197,11 +204,23 @@ public sealed class TwitchSource :
         if (page.HasMore && page.Cursor is { } next)
             SetCursor(category.CategoryId, offset + page.Items.Count, next);
 
+        var items = page.Items.Select(ToSourceItem).ToList();
+
+        // For a channel's collection, inject the CURRENT live broadcast as the first item on the first
+        // page when the channel is live. The host can theme it (red border / LIVE badge) via
+        // SourceItem.IsLiveStream. This is why a favorited channel opens its videos rather than playing.
+        if (node.Kind == TwNodeKind.ChannelVods && node.Login is { } chLogin && offset == 0)
+        {
+            var live = await _client!.GetLiveChannelAsync(chLogin, ct);
+            if (live is not null)
+                items.Insert(0, ToSourceItem(live, showLiveBadge: _liveIndicator));
+        }
+
         // Overstate the total while more pages remain so the host keeps requesting.
-        var total = offset + page.Items.Count + (page.HasMore ? count : 0);
+        var total = offset + items.Count + (page.HasMore ? count : 0);
         return new BrowsePage
         {
-            Items = page.Items.Select(ToSourceItem).ToList(),
+            Items = items,
             TotalSize = total,
         };
     }
@@ -276,14 +295,15 @@ public sealed class TwitchSource :
             ct.ThrowIfCancellationRequested();
             var live = await _client!.GetLiveChannelAsync(login, ct);
             if (live is not null)
-                liveItems.Add(ToSourceItem(live));
+                liveItems.Add(ToSourceItem(live, showLiveBadge: _liveIndicator));
 
+            var showLive = live is not null && _liveIndicator;
             cats.Add(new SourceCategory
             {
                 SourceInstanceId = InstanceId,
                 CategoryId = $"vods:{login}",
                 Title = live?.ChannelName ?? login,
-                Icon = live is not null ? IconLive : null,
+                Icon = showLive ? IconLive : IconChannel,
                 HasSubCategories = true,
                 SourceState = new TwNode(TwNodeKind.ChannelVods, login),
             });
@@ -317,50 +337,30 @@ public sealed class TwitchSource :
         List<TwFavorite> favs;
         lock (_gate) favs = _favorites.Values.OrderBy(f => f.Title).ToList();
 
-        var items = new List<SourceItem>();
+        var cats = new List<SourceCategory>();
         foreach (var f in favs)
         {
             ct.ThrowIfCancellationRequested();
 
-            // A channel favorite (twitch.tv/<login>, not a /videos/ VOD) has no fixed content — it's
-            // "whatever that channel is broadcasting now". Re-check its live status every open so it
-            // reflects the CURRENT stream: live favorites resolve to the active broadcast; offline
-            // ones are surfaced but marked unplayable rather than silently pointing at a dead URL.
-            if (IsChannelFavorite(f))
-            {
-                var live = await _client!.GetLiveChannelAsync(f.Id, ct);
-                if (live is not null)
-                {
-                    items.Add(ToSourceItem(live));
-                    continue;
-                }
-
-                items.Add(new SourceItem
-                {
-                    SourceInstanceId = InstanceId,
-                    ItemId = f.Id,
-                    Title = f.Title,
-                    Subtitle = "Offline",
-                    ThumbnailUrl = f.ThumbnailUrl,
-                    IsLiveStream = true,
-                    IsPlayable = false,
-                    SourceState = new TwState(f.Url, IsLive: true),
-                });
-                continue;
-            }
-
-            items.Add(new SourceItem
+            // Every favorite is a channel: a CONTAINER you drill into (its videos), not something that
+            // plays on click. Re-check live each open only to theme the tile (red LIVE glyph when the
+            // channel is broadcasting); the actual live stream is injected as the first item inside the
+            // channel's collection (see BrowsePageAsync). The live decoration honors the same
+            // "Show live indicator" setting as the in-collection badge, so the two stay consistent.
+            var live = await _client!.GetLiveChannelAsync(f.Login, ct);
+            var showLive = live is not null && _liveIndicator;
+            cats.Add(new SourceCategory
             {
                 SourceInstanceId = InstanceId,
-                ItemId = f.Id,
-                Title = f.Title,
-                ThumbnailUrl = f.ThumbnailUrl,
-                IsLiveStream = f.IsLive,
-                Duration = f.DurationSeconds is { } s ? TimeSpan.FromSeconds(s) : null,
-                SourceState = new TwState(f.Url, f.IsLive),
+                CategoryId = $"vods:{f.Login}",
+                Title = showLive ? $"{live!.ChannelName ?? f.Title} — ● LIVE" : (live?.ChannelName ?? f.Title),
+                Icon = showLive ? IconLive : IconChannel,
+                ThumbnailUrl = live?.ThumbnailUrl ?? f.ThumbnailUrl,
+                HasSubCategories = true,
+                SourceState = new TwNode(TwNodeKind.ChannelVods, f.Login),
             });
         }
-        return new BrowseResult { Items = items };
+        return new BrowseResult { Categories = cats };
     }
 
     public async IAsyncEnumerable<SourceItem> SearchAsync(
@@ -395,28 +395,39 @@ public sealed class TwitchSource :
         return await _resolver.GetMetadataAsync(state.Url, ct);
     }
 
+    // Favoriting always operates on the CHANNEL, keyed by login. A row's ItemId may be a login (live
+    // stream) or a video id (VOD); either way we resolve it to the owning channel. Consequence: star
+    // one Dead Flip video and every Dead Flip row shows starred — the whole view is consistent.
+
     public bool IsFavorite(string itemId)
     {
-        lock (_gate) return _favorites.ContainsKey(itemId);
+        var login = LoginOf(itemId);
+        if (login is null) return false;
+        lock (_gate) return _favorites.ContainsKey(login);
     }
 
     public void SetFavorite(string itemId, bool favorite)
     {
-        if (string.IsNullOrEmpty(itemId)) return;
+        var login = LoginOf(itemId);
+        if (login is null) return;
+
         lock (_gate)
         {
             bool changed;
             if (favorite)
             {
-                var rec = _seen.TryGetValue(itemId, out var v)
-                    ? new TwFavorite(v.Id, v.Title, v.Url, v.IsLive, v.Duration?.TotalSeconds, v.ThumbnailUrl)
-                    : new TwFavorite(itemId, $"Twitch {itemId}", $"https://www.twitch.tv/videos/{itemId}", false, null, null);
-                changed = !_favorites.ContainsKey(itemId);
-                _favorites[itemId] = rec;
+                // Build a display record from whatever we last saw for this channel.
+                var v = _seen.TryGetValue(itemId, out var seen) ? seen
+                      : _seen.Values.FirstOrDefault(x =>
+                            string.Equals(x.ChannelLogin, login, StringComparison.OrdinalIgnoreCase));
+                var title = v?.ChannelName ?? login;
+                var thumb = v is { IsLive: true } ? null : v?.ThumbnailUrl; // prefer stable profile art at open
+                changed = !_favorites.ContainsKey(login);
+                _favorites[login] = new TwFavorite(login, title, thumb);
             }
             else
             {
-                changed = _favorites.Remove(itemId);
+                changed = _favorites.Remove(login);
             }
             if (changed) SaveFavorites();
         }
@@ -424,26 +435,51 @@ public sealed class TwitchSource :
 
     public IReadOnlyCollection<string> GetFavoriteIds()
     {
-        lock (_gate) return _favorites.Keys.ToArray();
+        // Report every favorited channel's login PLUS any currently-seen video ids belonging to those
+        // channels, so the host's per-row star reflects "starred" across the whole channel view.
+        lock (_gate)
+        {
+            var ids = new HashSet<string>(_favorites.Keys, StringComparer.OrdinalIgnoreCase);
+            foreach (var v in _seen.Values)
+                if (v.ChannelLogin is { } cl && _favorites.ContainsKey(cl))
+                    ids.Add(v.Id);
+            return ids.ToArray();
+        }
     }
 
-    /// <summary>Rebuilds a playable item from a favorited id, using the stored rich record.</summary>
+    /// <summary>Rebuilds a playable item from a favorited id (a channel login), re-checking live.</summary>
     public SourceItem? GetFavorite(string itemId)
     {
-        if (string.IsNullOrEmpty(itemId)) return null;
+        var login = LoginOf(itemId);
+        if (login is null) return null;
+        lock (_gate) if (!_favorites.ContainsKey(login)) return null;
+
+        EnsureClient();
+        var live = _client!.GetLiveChannelAsync(login).GetAwaiter().GetResult();
+        if (live is not null) return ToSourceItem(live);
+
+        // Offline: surface an unplayable channel row.
         TwFavorite? f;
-        lock (_gate) f = _favorites.TryGetValue(itemId, out var rec) ? rec : null;
-        if (f is null) return null;
+        lock (_gate) f = _favorites.TryGetValue(login, out var rec) ? rec : null;
         return new SourceItem
         {
             SourceInstanceId = InstanceId,
-            ItemId = f.Id,
-            Title = f.Title,
-            ThumbnailUrl = f.ThumbnailUrl,
-            IsLiveStream = f.IsLive,
-            Duration = f.DurationSeconds is { } s ? TimeSpan.FromSeconds(s) : null,
-            SourceState = new TwState(f.Url, f.IsLive),
+            ItemId = login,
+            Title = f?.Title ?? login,
+            Subtitle = "Offline",
+            ThumbnailUrl = f?.ThumbnailUrl,
+            IsLiveStream = true,
+            IsPlayable = false,
+            SourceState = new TwState($"https://www.twitch.tv/{login}", IsLive: true, login),
         };
+    }
+
+    // Maps a row's ItemId to its owning channel login: a live-stream row is already the login; a VOD
+    // row is resolved via the channel we saw it under. Falls back to treating the id AS a login.
+    private string? LoginOf(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId)) return null;
+        return ChannelLoginFor(itemId) ?? itemId;
     }
 
     private string FavoritesPath =>
@@ -454,15 +490,15 @@ public sealed class TwitchSource :
         try
         {
             var path = FavoritesPath;
-            if (!File.Exists(path)) return new Dictionary<string, TwFavorite>(StringComparer.Ordinal);
+            if (!File.Exists(path)) return new Dictionary<string, TwFavorite>(StringComparer.OrdinalIgnoreCase);
             var list = JsonSerializer.Deserialize<List<TwFavorite>>(File.ReadAllText(path));
-            return (list ?? []).Where(f => !string.IsNullOrEmpty(f.Id))
-                .ToDictionary(f => f.Id, f => f, StringComparer.Ordinal);
+            return (list ?? []).Where(f => !string.IsNullOrEmpty(f.Login))
+                .ToDictionary(f => f.Login, f => f, StringComparer.OrdinalIgnoreCase);
         }
         catch (Exception ex)
         {
             _host?.Log($"Twitch: favorites read failed: {ex.Message}");
-            return new Dictionary<string, TwFavorite>(StringComparer.Ordinal);
+            return new Dictionary<string, TwFavorite>(StringComparer.OrdinalIgnoreCase);
         }
     }
 
@@ -491,16 +527,42 @@ public sealed class TwitchSource :
             Subtitle = v.ChannelName,
             ThumbnailUrl = v.ThumbnailUrl,
             IsLiveStream = v.IsLive,
+            ShowLiveBadge = false,
             Duration = v.Duration,
             PublishedAt = v.PublishedAt,
-            SourceState = new TwState(v.Url, v.IsLive),
+            SourceState = new TwState(v.Url, v.IsLive, v.ChannelLogin),
         };
     }
 
-    // A channel favorite (live, keyed by login) vs. a finite VOD favorite. Channel favorites point at
-    // twitch.tv/<login>; VODs point at twitch.tv/videos/<id>. We re-check channel favorites live.
-    private static bool IsChannelFavorite(TwFavorite f) =>
-        f.IsLive && !f.Url.Contains("/videos/", StringComparison.OrdinalIgnoreCase);
+    // Overload that lets the caller opt into the red "live now" thumbnail badge — used for the live
+    // feed injected atop a channel's collection (gated by the "Show live indicator" setting).
+    private SourceItem ToSourceItem(TwitchVideo v, bool showLiveBadge)
+    {
+        lock (_gate) _seen[v.Id] = v;
+        return new SourceItem
+        {
+            SourceInstanceId = InstanceId,
+            ItemId = v.Id,
+            Title = v.Title,
+            Subtitle = v.ChannelName,
+            ThumbnailUrl = v.ThumbnailUrl,
+            IsLiveStream = v.IsLive,
+            ShowLiveBadge = showLiveBadge && v.IsLive,
+            Duration = v.Duration,
+            PublishedAt = v.PublishedAt,
+            SourceState = new TwState(v.Url, v.IsLive, v.ChannelLogin),
+        };
+    }
+
+    // Resolves the owning channel login for a row's ItemId. Live-stream rows are already keyed by
+    // login; VOD rows are keyed by video id, so we look up the channel we saw them under.
+    private string? ChannelLoginFor(string itemId)
+    {
+        lock (_gate)
+            return _seen.TryGetValue(itemId, out var v) && !string.IsNullOrEmpty(v.ChannelLogin)
+                ? v.ChannelLogin
+                : null;
+    }
 
     // ── Cursor bookkeeping (map the host's offset paging onto Twitch forward cursors) ────────────
     private readonly Dictionary<string, string> _cursors = new(StringComparer.Ordinal);
