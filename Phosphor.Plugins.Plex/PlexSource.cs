@@ -181,7 +181,8 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
 
     public async Task<BrowseResult> BrowseAsync(SourceCategory category, CancellationToken ct = default)
     {
-        if (category.SourceState is not PlexNode node)
+        var node = ResolveNode(category);
+        if (node is null)
             return new BrowseResult();
 
         return node.Kind switch
@@ -195,6 +196,30 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
             PlexNodeKind.Playlist => await BrowsePlaylistAsync(node, ct),
             _ => new BrowseResult(),
         };
+    }
+
+    /// <summary>
+    /// Resolves the <see cref="PlexNode"/> for a browse/search request. Prefers the in-memory
+    /// <see cref="SourceCategory.SourceState"/> (set during live browsing), but falls back to
+    /// reconstructing the node from the DURABLE <see cref="SourceCategory.CategoryId"/> — so a scope
+    /// persisted as a plain id (e.g. a saved live playlist bound to a Plex library) still resolves
+    /// without the in-memory state. Currently only the <c>library:{key}</c> form is reconstructable
+    /// (the library type is recovered from the configured library list); returns <c>null</c> when the
+    /// node can't be determined.
+    /// </summary>
+    private PlexNode? ResolveNode(SourceCategory category)
+    {
+        if (category.SourceState is PlexNode node) return node;
+
+        var id = category.CategoryId;
+        if (id is { Length: > 0 } && id.StartsWith("library:", StringComparison.Ordinal))
+        {
+            var key = id["library:".Length..];
+            var type = _libraries.FirstOrDefault(l => l.Key == key)?.Type ?? "artist";
+            return new PlexNode(PlexNodeKind.Library, key, type);
+        }
+
+        return null;
     }
 
     private async Task<BrowseResult> BrowseLibraryAsync(PlexNode node, CancellationToken ct)
@@ -302,8 +327,10 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
     public async Task<BrowseResult> SearchInCategoryAsync(
         SourceCategory node, string query, CancellationToken ct = default)
     {
-        // Only library-scoped search is supported; other nodes return nothing.
-        if (node.SourceState is not PlexNode plexNode || plexNode.Kind != PlexNodeKind.Library)
+        // Only library-scoped search is supported; other nodes return nothing. The scope node is
+        // resolved from SourceState when browsing live, or rebuilt from the durable CategoryId when
+        // replaying a persisted scope (e.g. a saved live playlist bound to a Plex library).
+        if (ResolveNode(node) is not { Kind: PlexNodeKind.Library } plexNode)
             return new BrowseResult();
 
         if (plexNode.LibraryType == "artist")
