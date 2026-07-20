@@ -1,4 +1,3 @@
-using System.Net.Http;
 using Phosphor.Plugin.Abstractions;
 
 namespace Phosphor.Plugins.YouTube;
@@ -17,10 +16,6 @@ public sealed class YouTubeSourceProvider : IPhosphorSourceProvider
     public const string KeyVideoEngine = "videoEngine";
     public const string KeyVideoQuality = "videoQuality";
     public const string KeyPreferStereo = "preferStereo";
-
-    private readonly HttpClient? _http;
-
-    public YouTubeSourceProvider(HttpClient? http = null) => _http = http;
 
     public string TypeId => YouTubeTypeId;
     public string DisplayName => "YouTube";
@@ -60,5 +55,5 @@ public sealed class YouTubeSourceProvider : IPhosphorSourceProvider
     ];
 
     public IPhosphorSource CreateInstance(string instanceId, IReadOnlyDictionary<string, string?> settings)
-        => new YouTubeSource(instanceId, settings, _http);
+        => new YouTubeSource(instanceId, settings);
 }
