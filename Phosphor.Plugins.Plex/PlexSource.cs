@@ -228,14 +228,18 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
     private async Task<BrowseResult> BrowseLibraryAsync(PlexNode node, CancellationToken ct)
     {
         await Task.CompletedTask;
-        // A library expands to its "Hubs" and "Playlists" grouping nodes only. Its actual children
-        // (artists for music, videos otherwise) are served through the paged path (BrowsePageAsync)
-        // so large libraries lazy-load and aren't rendered twice (the host runs both BrowseAsync and,
-        // because the library is IPagedBrowsable, the paged path). Container children (artists/albums)
-        // come back as leaf SourceItems flagged IsContainer, which the host drills into.
-        var categories = new List<SourceCategory>
+        // A library expands to its "Hubs" and "Playlists" grouping nodes (each gated on the user's
+        // per-library sub-toggles). Its actual children (artists for music, videos otherwise) are
+        // served through the paged path (BrowsePageAsync) so large libraries lazy-load and aren't
+        // rendered twice (the host runs both BrowseAsync and, because the library is IPagedBrowsable,
+        // the paged path). Container children (artists/albums) come back as leaf SourceItems flagged
+        // IsContainer, which the host drills into.
+        var mapping = _libraries.FirstOrDefault(l => l.Key == node.Key);
+        var categories = new List<SourceCategory>();
+
+        if (mapping?.HubsEnabled ?? false)
         {
-            new()
+            categories.Add(new()
             {
                 SourceInstanceId = InstanceId,
                 CategoryId = $"hublist:{node.Key}",
@@ -243,8 +247,12 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
                 // No own icon → inherits the parent library's icon (music note / clapperboard).
                 HasSubCategories = true,
                 SourceState = new PlexNode(PlexNodeKind.HubList, node.Key, node.LibraryType),
-            },
-            new()
+            });
+        }
+
+        if (mapping?.PlaylistsEnabled ?? false)
+        {
+            categories.Add(new()
             {
                 SourceInstanceId = InstanceId,
                 CategoryId = $"playlistlist:{node.Key}",
@@ -252,8 +260,8 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
                 // No own icon → inherits the parent library's icon.
                 HasSubCategories = true,
                 SourceState = new PlexNode(PlexNodeKind.PlaylistList, node.Key, node.LibraryType),
-            },
-        };
+            });
+        }
 
         return new BrowseResult { Categories = categories };
     }
