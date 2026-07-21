@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.Plex;
 /// In-box, so it uses <see cref="PlexService"/>, <see cref="VideoItem"/>, and the Plex enums
 /// directly. Pure data producer: no UI, no thread assumptions.
 /// </remarks>
-public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterableSearch, IBrowsable, IPagedBrowsable, IScopedSearchable, IPlayableResolver, IConfigurable, IGaplessCapable, IConnectionTestable, IFavoritable, IFavoriteCapture
+public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterableSearch, IBrowsable, IPagedBrowsable, IScopedSearchable, IPlayableResolver, IConfigurable, IGaplessCapable, IConnectionTestable, IFavoritable, IFavoriteCapture, ISearchHintProvider
 {
     private readonly PlexService _plex = new();
     private IPluginHost? _host;
@@ -38,6 +38,9 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
 
     public bool IsConfigured => _plex.IsConfigured;
     public bool IsEnabled { get; set; } = true;
+
+    /// <summary>Search-box hint advertising Plex's query grammar (see <see cref="ISearchHintProvider"/>).</summary>
+    public string? SearchHint => "...try min:5m, max:30m, library:<name>";
 
     public Task InitializeAsync(IPluginHost host, CancellationToken ct = default)
     {

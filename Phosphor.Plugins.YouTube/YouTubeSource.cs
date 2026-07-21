@@ -19,7 +19,7 @@ namespace Phosphor.Plugins.YouTube;
 /// YoutubeExplode package and existing engine code directly. It is a pure data producer:
 /// it never touches UI or assumes a thread.
 /// </remarks>
-public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable
+public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable, ISearchHintProvider
 {
     private HttpClient? _http;
     private static readonly HttpClient _sharedHttp = new() { Timeout = TimeSpan.FromSeconds(15) };
@@ -49,6 +49,9 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
 
     /// <summary>YouTube needs no credentials — it is always considered configured.</summary>
     public bool IsConfigured => true;
+
+    /// <summary>Search-box hint advertising YouTube's query grammar (see <see cref="ISearchHintProvider"/>).</summary>
+    public string? SearchHint => "...try channel:<name>, playlist:<name>, min:5m, max:30m";
 
     public bool IsEnabled { get; set; } = true;
 
