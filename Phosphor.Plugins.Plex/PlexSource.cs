@@ -431,8 +431,10 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
                 return new ConfigOption(l.Key, $"{l.Title} ({l.Type})", prev != null,
                     new[]
                     {
-                        new ConfigSubOption("hubs", "Hubs", prev?.HubsEnabled ?? false),
-                        new ConfigSubOption("playlists", "Playlists", prev?.PlaylistsEnabled ?? false),
+                        new ConfigSubOption("hubs", "Hubs", prev?.HubsEnabled ?? false,
+                            "Show a Hubs tile (Recently Added, etc.)"),
+                        new ConfigSubOption("playlists", "Playlists", prev?.PlaylistsEnabled ?? false,
+                            "Show a Playlists tile"),
                     });
             })
             .ToList();

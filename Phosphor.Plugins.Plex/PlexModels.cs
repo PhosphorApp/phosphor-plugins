@@ -47,6 +47,26 @@ public sealed class PlexLibraryMapping
     public string Key { get; set; } = "";
     public string Title { get; set; } = "";
     public string Type { get; set; } = "";
-    public bool HubsEnabled { get; set; }
-    public bool PlaylistsEnabled { get; set; }
+
+    /// <summary>
+    /// Per-library sub-toggles keyed by sub-option id, shared with the host's source-agnostic
+    /// <c>SourceLibraryMapping.SubFlags</c> JSON shape. Plex's ids are "hubs" and "playlists".
+    /// </summary>
+    public Dictionary<string, bool> SubFlags { get; set; } = new();
+
+    /// <summary>Whether the "Hubs" grouping tile is shown (computed over <see cref="SubFlags"/>).</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HubsEnabled
+    {
+        get => SubFlags.TryGetValue("hubs", out var v) && v;
+        set => SubFlags["hubs"] = value;
+    }
+
+    /// <summary>Whether the "Playlists" grouping tile is shown (computed over <see cref="SubFlags"/>).</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool PlaylistsEnabled
+    {
+        get => SubFlags.TryGetValue("playlists", out var v) && v;
+        set => SubFlags["playlists"] = value;
+    }
 }
