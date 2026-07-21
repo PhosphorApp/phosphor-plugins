@@ -19,7 +19,7 @@ namespace Phosphor.Plugins.YouTube;
 /// YoutubeExplode package and existing engine code directly. It is a pure data producer:
 /// it never touches UI or assumes a thread.
 /// </remarks>
-public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable, ISearchHintProvider, ISavedSearchCategories
+public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable, ISearchHintProvider, ISavedSearchCategories, IEditableSavedSearchCategories
 {
     private HttpClient? _http;
     private static readonly HttpClient _sharedHttp = new() { Timeout = TimeSpan.FromSeconds(15) };
@@ -147,6 +147,49 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
                 .Select(c => new SavedSearchCategory(c.Id, c.Name, c.Icon, c.SearchTerm))
                 .ToList();
     }
+
+    // ── IEditableSavedSearchCategories ─────────────────────────────────────────
+
+    /// <summary>Translates an edited category list into an updated settings blob (JSON under
+    /// <see cref="YouTubeSourceProvider.KeyCategories"/>). Assigns ids to new rows, drops empty
+    /// rows (no name AND no search term), and renumbers <c>SortOrder</c> by the incoming order.</summary>
+    public IReadOnlyDictionary<string, string?> ApplySavedSearchCategories(
+        IReadOnlyList<SavedSearchCategory> categories,
+        IReadOnlyDictionary<string, string?> currentSettings)
+    {
+        var list = new List<YouTubeCategory>();
+        int order = 0;
+        foreach (var c in categories)
+        {
+            if (string.IsNullOrWhiteSpace(c.Name) && string.IsNullOrWhiteSpace(c.SearchTerm))
+                continue;
+            list.Add(new YouTubeCategory
+            {
+                Id = string.IsNullOrEmpty(c.Id) ? Guid.NewGuid().ToString("N") : c.Id,
+                Name = c.Name?.Trim() ?? "",
+                Icon = c.Icon?.Trim() ?? "",
+                SearchTerm = c.SearchTerm?.Trim() ?? "",
+                SortOrder = order++,
+            });
+        }
+
+        // Reflect the edit immediately in this live instance too.
+        lock (_categoriesGate)
+            _categories = list;
+
+        var result = new Dictionary<string, string?>(currentSettings)
+        {
+            [YouTubeSourceProvider.KeyCategories] = YouTubeCategoryStore.Serialize(list),
+        };
+        return result;
+    }
+
+    /// <summary>The plug-in's built-in default categories, for a "restore defaults" affordance.</summary>
+    public IReadOnlyList<SavedSearchCategory> GetDefaultSavedSearchCategories() =>
+        YouTubeCategoryStore.LoadDefaults(s => _host?.Log(s))
+            .OrderBy(c => c.SortOrder)
+            .Select(c => new SavedSearchCategory(c.Id, c.Name, c.Icon, c.SearchTerm))
+            .ToList();
 
     // ── ITextSearchCapable ─────────────────────────────────────────────────────
 
