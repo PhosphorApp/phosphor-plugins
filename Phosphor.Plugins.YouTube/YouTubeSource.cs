@@ -19,7 +19,7 @@ namespace Phosphor.Plugins.YouTube;
 /// YoutubeExplode package and existing engine code directly. It is a pure data producer:
 /// it never touches UI or assumes a thread.
 /// </remarks>
-public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable, ISearchHintProvider
+public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable, ISearchHintProvider, ISavedSearchCategories
 {
     private HttpClient? _http;
     private static readonly HttpClient _sharedHttp = new() { Timeout = TimeSpan.FromSeconds(15) };
@@ -29,6 +29,11 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     private VideoEngineKind _videoKind = VideoEngineKind.YoutubeExplode;
     private VideoQualityPreference _quality = VideoQualityPreference.High;
     private bool _preferStereo = true;
+
+    // User-defined category tiles (Rock/Pop/…). Plug-in-owned: seeded from the bundled
+    // default-categories.json on first run, then persisted in the instance settings blob.
+    private readonly object _categoriesGate = new();
+    private List<YouTubeCategory> _categories = [];
 
     private ISearchEngine _search;
     private IVideoEngine _video;
@@ -99,11 +104,48 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
         _quality = ParseEnum(values, YouTubeSourceProvider.KeyVideoQuality, VideoQualityPreference.High);
         _preferStereo = ParseBool(values, YouTubeSourceProvider.KeyPreferStereo, true);
 
+        // Load the user's categories from the persisted blob; seed from the plug-in defaults on
+        // first run (empty/absent blob) so a fresh instance still ships the baked-in tiles.
+        LoadCategories(values.TryGetValue(YouTubeSourceProvider.KeyCategories, out var catJson) ? catJson : null);
+
         // Re-create engines through the existing factories (which keep the availability
         // fallback), so a settings change takes effect immediately.
         _search = SearchEngineFactory.Create(_searchKind, _http);
         _video = VideoEngineFactory.Create(_videoKind);
         _host?.Log($"YouTubeSource: search={_searchKind} video={_videoKind} quality={_quality} stereo={_preferStereo}");
+    }
+
+    // ── Categories (plug-in-owned tiles) ───────────────────────────────────────
+
+    /// <summary>Loads the category list from the persisted JSON blob, seeding from the bundled
+    /// default-categories.json when the blob is empty/absent (first run).</summary>
+    private void LoadCategories(string? json)
+    {
+        var list = YouTubeCategoryStore.Deserialize(json, s => _host?.Log(s));
+        if (list.Count == 0)
+            list = YouTubeCategoryStore.LoadDefaults(s => _host?.Log(s));
+        lock (_categoriesGate)
+            _categories = list;
+    }
+
+    /// <summary>A snapshot of the current user categories, ordered by <see cref="YouTubeCategory.SortOrder"/>.</summary>
+    public IReadOnlyList<YouTubeCategory> Categories
+    {
+        get { lock (_categoriesGate) return _categories.OrderBy(c => c.SortOrder).ToList(); }
+    }
+
+    // ── ISavedSearchCategories ─────────────────────────────────────────────────
+
+    /// <summary>Surfaces the user's YouTube categories to the host as source-bound saved-search
+    /// tiles. The host runs each <see cref="SavedSearchCategory.SearchTerm"/> through its own query
+    /// grammar bound to this source.</summary>
+    public IReadOnlyList<SavedSearchCategory> GetSavedSearchCategories()
+    {
+        lock (_categoriesGate)
+            return _categories
+                .OrderBy(c => c.SortOrder)
+                .Select(c => new SavedSearchCategory(c.Id, c.Name, c.Icon, c.SearchTerm))
+                .ToList();
     }
 
     // ── ITextSearchCapable ─────────────────────────────────────────────────────

@@ -17,6 +17,10 @@ public sealed class YouTubeSourceProvider : IPhosphorSourceProvider
     public const string KeyVideoQuality = "videoQuality";
     public const string KeyPreferStereo = "preferStereo";
 
+    /// <summary>Settings key holding the JSON-serialized user category list (tiles). Owned by the
+    /// plug-in; seeded from the bundled <c>default-categories.json</c> on first run.</summary>
+    public const string KeyCategories = "categories";
+
     public string TypeId => YouTubeTypeId;
     public string DisplayName => "YouTube";
     public string? Description =>
