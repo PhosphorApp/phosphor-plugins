@@ -19,7 +19,7 @@ namespace Phosphor.Plugins.YouTube;
 /// YoutubeExplode package and existing engine code directly. It is a pure data producer:
 /// it never touches UI or assumes a thread.
 /// </remarks>
-public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable, ISearchHintProvider, ISavedSearchCategories, IEditableSavedSearchCategories
+public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable, ISearchHintProvider, ISavedSearchCategories, IEditableSavedSearchCategories, IResultCachePolicy
 {
     private HttpClient? _http;
     private static readonly HttpClient _sharedHttp = new() { Timeout = TimeSpan.FromSeconds(15) };
@@ -190,6 +190,12 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
             .OrderBy(c => c.SortOrder)
             .Select(c => new SavedSearchCategory(c.Id, c.Name, c.Icon, c.SearchTerm))
             .ToList();
+
+    // ── IResultCachePolicy ─────────────────────────────────────────────────────
+
+    /// <summary>YouTube result pages (category/playlist searches) are stable enough to cache; use
+    /// the host's default max age.</summary>
+    public ResultCachePolicy GetResultCachePolicy() => new(Cache: true);
 
     // ── ITextSearchCapable ─────────────────────────────────────────────────────
 

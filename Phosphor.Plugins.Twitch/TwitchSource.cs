@@ -30,7 +30,7 @@ internal sealed record TwFavorite(string Login, string Title, string? ThumbnailU
 /// </summary>
 public sealed class TwitchSource :
     IPhosphorSource, IBrowsable, IPagedBrowsable, ITextSearchCapable, IPlayableResolver,
-    IDeferredStreamResolution, IFavoritable, IConnectionTestable
+    IDeferredStreamResolution, IFavoritable, IConnectionTestable, IResultCachePolicy
 {
     private static readonly HttpClient SharedHttpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
 
@@ -126,6 +126,11 @@ public sealed class TwitchSource :
         }
         _resolver = new YtDlpResolver(path, _host is { } h ? h.Log : null);
     }
+
+    // ── IResultCachePolicy ─────────────────────────────────────────────────────
+
+    /// <summary>Twitch results are ephemeral live streams — never cache their result pages.</summary>
+    public ResultCachePolicy GetResultCachePolicy() => new(Cache: false);
 
     public async Task<ConnectionTestResult> TestConnectionAsync(CancellationToken ct = default)
     {
