@@ -16,11 +16,12 @@ namespace Phosphor.Plugins.LocalFolder;
 public sealed class LocalFolderSource :
     IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IRefreshable, IGaplessCapable
 {
-    // File extensions we treat as playable media.
-    private static readonly HashSet<string> VideoExtensions =
-        new(StringComparer.OrdinalIgnoreCase) { ".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv" };
-    private static readonly HashSet<string> AudioExtensions =
-        new(StringComparer.OrdinalIgnoreCase) { ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma" };
+    // File extensions we treat as playable media. These are configurable per instance (see the
+    // video/audio extension settings) so a user can, for example, run one source over a mixed folder
+    // filtering to video and a second over the same folder filtering to audio. Populated from
+    // settings in ApplySettingsInternal; empty when the user selects "None" for that media kind.
+    private HashSet<string> _videoExtensions = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _audioExtensions = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly object _gate = new();
     private List<MediaEntry> _catalog = [];
@@ -80,6 +81,13 @@ public sealed class LocalFolderSource :
         };
         _extractThumbnails = bool.TryParse(Get(values, LocalFolderSourceProvider.KeyExtractThumbnails), out var t) && t;
 
+        _videoExtensions = ParseExtensions(
+            Get(values, LocalFolderSourceProvider.KeyVideoExtensions),
+            LocalFolderSourceProvider.RecommendedVideoExtensions);
+        _audioExtensions = ParseExtensions(
+            Get(values, LocalFolderSourceProvider.KeyAudioExtensions),
+            LocalFolderSourceProvider.RecommendedAudioExtensions);
+
         // Settings changed — the catalog is stale.
         lock (_gate)
         {
@@ -87,7 +95,44 @@ public sealed class LocalFolderSource :
             _catalogBuilt = false;
             _catalogSavedUtc = null;
         }
-        _host?.Log($"LocalFolderSource: {_folders.Count} folder(s), recursive={_recursive}, cacheMaxAgeHours={_cacheMaxAgeHours}, organizeBy={_organizeBy}, thumbnails={_extractThumbnails}");
+        _host?.Log($"LocalFolderSource: {_folders.Count} folder(s), recursive={_recursive}, cacheMaxAgeHours={_cacheMaxAgeHours}, organizeBy={_organizeBy}, thumbnails={_extractThumbnails}, video=[{string.Join(' ', _videoExtensions)}], audio=[{string.Join(' ', _audioExtensions)}]");
+    }
+
+    /// <summary>
+    /// Turns a stored extension setting into a normalized set of "<c>.ext</c>" tokens. A null value
+    /// (the key was never configured) falls back to the shipped <paramref name="recommended"/> list.
+    /// Otherwise the text is tokenized on whitespace, commas, or semicolons and <em>only real
+    /// extension tokens are kept</em> — any word that isn't a valid extension (e.g. the "None"
+    /// convention, or an empty box) is simply ignored, yielding an empty set that indexes nothing of
+    /// that media kind. The leading dot is optional.
+    /// </summary>
+    private static HashSet<string> ParseExtensions(string? value, IReadOnlyCollection<string> recommended)
+    {
+        // Never configured → ship the recommended defaults.
+        if (value is null)
+            return new(recommended, StringComparer.OrdinalIgnoreCase);
+
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var token in value.Split([' ', '\t', '\r', '\n', ',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var ext = token.StartsWith('.') ? token : "." + token;
+            if (IsExtensionToken(ext))
+                set.Add(ext);
+        }
+        return set;
+    }
+
+    /// <summary>
+    /// True when a token looks like a real file extension (a dot followed by alphanumerics only), so
+    /// reserved words like "None" or stray prose in the field are ignored rather than treated as an
+    /// extension to match.
+    /// </summary>
+    private static bool IsExtensionToken(string ext)
+    {
+        if (ext.Length < 2 || ext[0] != '.') return false;
+        for (int i = 1; i < ext.Length; i++)
+            if (!char.IsLetterOrDigit(ext[i])) return false;
+        return true;
     }
 
     // ── IRefreshable ───────────────────────────────────────────────────────────
@@ -140,8 +185,8 @@ public sealed class LocalFolderSource :
                 {
                     ct.ThrowIfCancellationRequested();
                     var ext = Path.GetExtension(path);
-                    var isVideo = VideoExtensions.Contains(ext);
-                    var isAudio = AudioExtensions.Contains(ext);
+                    var isVideo = _videoExtensions.Contains(ext);
+                    var isAudio = _audioExtensions.Contains(ext);
                     if (!isVideo && !isAudio) continue;
 
                     long size;

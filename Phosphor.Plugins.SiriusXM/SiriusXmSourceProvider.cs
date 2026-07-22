@@ -38,6 +38,12 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
 
     public Version ApiVersion => PluginApi.Current;
 
+    /// <summary>SiriusXM streaming requires an active paid subscription.</summary>
+    public AccountRequirement? Account => new(
+        Summary: "an active SiriusXM streaming subscription",
+        SignupUrl: "https://www.siriusxm.com/plans",
+        IsPaid: true);
+
     // One account per configured instance — a second SiriusXM login is an unusual case.
     public bool SupportsMultipleInstances => false;
 

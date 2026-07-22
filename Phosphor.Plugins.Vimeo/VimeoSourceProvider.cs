@@ -26,11 +26,17 @@ public sealed class VimeoSourceProvider : IPhosphorSourceProvider
 
     public string? Description =>
         "Browses Vimeo's categories and searches Vimeo. Requires a Vimeo API access token " +
-        "(unauthenticated / public scope) — Vimeo has no keyless discovery. Playback is resolved " +
-        "through the bundled yt-dlp. Star a video to pin it to your Favorites. Private, " +
-        "password-protected, or domain-locked videos cannot be resolved.";
+        "(unauthenticated / public scope) — Vimeo has no keyless discovery. " +
+        "Star a video to pin it to your Favorites. Private, " +
+        "password-protected, or domain-locked videos will not work.";
 
     public Version ApiVersion => PluginApi.Current;
+
+    /// <summary>Vimeo browse/search needs a developer access token tied to a (free) Vimeo account.</summary>
+    public AccountRequirement? Account => new(
+        Summary: "a free Vimeo account (for an API access token)",
+        SignupUrl: "https://developer.vimeo.com",
+        IsPaid: false);
 
     // A user may want several Vimeo tiles.
     public bool SupportsMultipleInstances => true;

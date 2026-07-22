@@ -43,10 +43,8 @@ public sealed class TwitchSourceProvider : IPhosphorSourceProvider, IExperimenta
 
     public string? Description =>
         "Browses curated pinball channels, the top live directory, and channel VODs, and searches " +
-        "Twitch — all keyless (no account, token, or setup; Twitch's public GraphQL is anonymous). " +
-        "Playback is resolved through the bundled yt-dlp; live streams play as continuous 'live' " +
-        "with no seek, VODs are finite and seekable. Star an item to pin it to your Favorites. " +
-        "Subscriber-only or geo-restricted content cannot be resolved.";
+        "Twitch — all keyless (no account, token, or setup; Twitch's public GraphQL is anonymous). " +   
+        "Subscriber-only or geo-restricted content will not work.";
 
     public Version ApiVersion => PluginApi.Current;
 

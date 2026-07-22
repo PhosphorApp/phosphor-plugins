@@ -20,9 +20,8 @@ public sealed class DailymotionSourceProvider : IPhosphorSourceProvider
 
     public string? Description =>
         "Browses Dailymotion's categories (Music, Movies, Gaming, …) and searches Dailymotion. " +
-        "No account, token, or setup needed — Dailymotion's public API is keyless. Playback is " +
-        "resolved through the bundled yt-dlp. Star a video to pin it to your Favorites. Private or " +
-        "geo-restricted videos cannot be resolved.";
+        "No account, token, or setup needed — Dailymotion's public API is keyless. " +
+        "Star a video to pin it to your Favorites. Private or geo-restricted videos will not work.";
 
     public Version ApiVersion => PluginApi.Current;
 

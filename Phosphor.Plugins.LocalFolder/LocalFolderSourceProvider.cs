@@ -40,6 +40,31 @@ public sealed class LocalFolderSourceProvider : IPhosphorSourceProvider
     /// <summary>Settings key: whether to extract per-file thumbnails during a rescan ("true"/"false").</summary>
     public const string KeyExtractThumbnails = "extractThumbnails";
 
+    /// <summary>Settings key: which file extensions are indexed as video. See <see cref="RecommendedVideoExtensions"/>.</summary>
+    public const string KeyVideoExtensions = "videoExtensions";
+
+    /// <summary>Settings key: which file extensions are indexed as audio. See <see cref="RecommendedAudioExtensions"/>.</summary>
+    public const string KeyAudioExtensions = "audioExtensions";
+
+    /// <summary>
+    /// Reserved value for the extension settings meaning "index nothing of this media kind" — useful
+    /// when two sources point at the same mixed folder and one handles video while the other handles
+    /// audio. Any text that contains no real extension token has the same effect (the box may simply
+    /// be cleared), but "None" is the conventional, self-documenting way to express it.
+    /// </summary>
+    public const string ExtensionsNone = "None";
+
+    /// <summary>The shipped default set of video file extensions.</summary>
+    public static readonly IReadOnlyList<string> RecommendedVideoExtensions =
+        [".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".wmv", ".flv"];
+
+    /// <summary>The shipped default set of audio file extensions.</summary>
+    public static readonly IReadOnlyList<string> RecommendedAudioExtensions =
+        [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"];
+
+    private static readonly string RecommendedVideoExtensionsText = string.Join(" ", RecommendedVideoExtensions);
+    private static readonly string RecommendedAudioExtensionsText = string.Join(" ", RecommendedAudioExtensions);
+
     public string TypeId => LocalFolderTypeId;
     public string DisplayName => "Local Folders";
     public string? Description =>
@@ -72,6 +97,26 @@ public sealed class LocalFolderSourceProvider : IPhosphorSourceProvider
         new(KeyExtractThumbnails, "Extract thumbnails", PluginSettingType.Bool, DefaultValue: "false",
             HelpText: "During a rescan, generate a thumbnail per file — embedded cover art for audio, " +
                       "and a video frame (requires the host's ffmpeg). Cached on disk; adds scan time."),
+        new(KeyVideoExtensions, "Video extensions", PluginSettingType.Text, DefaultValue: RecommendedVideoExtensionsText,
+            HelpText: "File extensions indexed as video, separated by spaces. Use \"None\" to index no " +
+                      "video — e.g. when a second source over the same folder handles audio.")
+        {
+            Presets =
+            [
+                new("Default", RecommendedVideoExtensionsText),
+                new("None", ExtensionsNone),
+            ],
+        },
+        new(KeyAudioExtensions, "Audio extensions", PluginSettingType.Text, DefaultValue: RecommendedAudioExtensionsText,
+            HelpText: "File extensions indexed as audio, separated by spaces. Use \"None\" to index no " +
+                      "audio — e.g. when a second source over the same folder handles video.")
+        {
+            Presets =
+            [
+                new("Default", RecommendedAudioExtensionsText),
+                new("None", ExtensionsNone),
+            ],
+        },
     ];
 
     public IPhosphorSource CreateInstance(string instanceId, IReadOnlyDictionary<string, string?> settings)
