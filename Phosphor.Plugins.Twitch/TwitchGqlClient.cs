@@ -124,6 +124,8 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
         using var doc = JsonDocument.Parse(text);
         if (!TryGetPath(doc.RootElement, out var conn, "data", "games"))
             return ([], false, null);
+        if (conn.ValueKind != JsonValueKind.Object)
+            return ([], false, null);
 
         var items = new List<TwitchCategory>();
         string? lastCursor = null;
@@ -329,6 +331,11 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
 
     private TwitchVideoPage ParseStreamsConnection(JsonElement conn)
     {
+        // The connection can be JSON null (e.g. an unavailable directory/stream list); guard so we
+        // don't call TryGetProperty on a non-object element (which throws).
+        if (conn.ValueKind != JsonValueKind.Object)
+            return new TwitchVideoPage([], false, null);
+
         var items = new List<TwitchVideo>();
         string? lastCursor = null;
         if (conn.TryGetProperty("edges", out var edges) && edges.ValueKind == JsonValueKind.Array)
@@ -349,6 +356,11 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
 
     private TwitchVideoPage ParseVideosConnection(JsonElement conn, string login)
     {
+        // A live channel with no archived VODs returns a null "videos" connection; guard so we don't
+        // call TryGetProperty on a non-object element (which throws).
+        if (conn.ValueKind != JsonValueKind.Object)
+            return new TwitchVideoPage([], false, null);
+
         var items = new List<TwitchVideo>();
         string? lastCursor = null;
         if (conn.TryGetProperty("edges", out var edges) && edges.ValueKind == JsonValueKind.Array)
