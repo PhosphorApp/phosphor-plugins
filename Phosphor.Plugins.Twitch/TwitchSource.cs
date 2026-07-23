@@ -30,7 +30,8 @@ internal sealed record TwFavorite(string Login, string Title, string? ThumbnailU
 /// </summary>
 public sealed class TwitchSource :
     IPhosphorSource, IBrowsable, IPagedBrowsable, ITextSearchCapable, IPlayableResolver,
-    IDeferredStreamResolution, IFavoritable, IConnectionTestable, IResultCachePolicy
+    IDeferredStreamResolution, IFavoritable, IConnectionTestable, IResultCachePolicy,
+    IReplayableById
 {
     private static readonly HttpClient SharedHttpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
 
@@ -354,18 +355,34 @@ public sealed class TwitchSource :
             // "Show live indicator" setting as the in-collection badge, so the two stay consistent.
             var live = await _client!.GetLiveChannelAsync(f.Login, ct);
             var showLive = live is not null && _liveIndicator;
+            var thumb = await ResolveChannelThumbAsync(f.Login, live, f.ThumbnailUrl, ct);
             cats.Add(new SourceCategory
             {
                 SourceInstanceId = InstanceId,
                 CategoryId = $"vods:{f.Login}",
                 Title = showLive ? $"{live!.ChannelName ?? f.Title} — ● LIVE" : (live?.ChannelName ?? f.Title),
                 Icon = showLive ? IconLive : IconChannel,
-                ThumbnailUrl = live?.ThumbnailUrl ?? f.ThumbnailUrl,
+                ThumbnailUrl = thumb,
                 HasSubCategories = true,
                 SourceState = new TwNode(TwNodeKind.ChannelVods, f.Login),
             });
         }
         return new BrowseResult { Categories = cats };
+    }
+
+    /// <summary>
+    /// Resolves the best thumbnail for a channel container: the LIVE preview frame when broadcasting,
+    /// else the most-recent VOD's thumbnail ("first thumbnail wins"), else a stored/avatar fallback.
+    /// The live case is dynamic (reflects the current show); the VOD fallback keeps offline channels
+    /// from rendering blank.
+    /// </summary>
+    private async Task<string?> ResolveChannelThumbAsync(
+        string login, TwitchVideo? live, string? fallback, CancellationToken ct)
+    {
+        if (live?.ThumbnailUrl is { Length: > 0 } livePreview)
+            return livePreview;
+        var vodThumb = await _client!.GetMostRecentVodThumbnailAsync(login, ct);
+        return !string.IsNullOrEmpty(vodThumb) ? vodThumb : fallback;
     }
 
     public async IAsyncEnumerable<SourceItem> SearchAsync(
@@ -452,7 +469,10 @@ public sealed class TwitchSource :
         }
     }
 
-    /// <summary>Rebuilds a playable item from a favorited id (a channel login), re-checking live.</summary>
+    /// <summary>Rebuilds a favorited channel as a browsable CONTAINER (its VODs, with the live feed
+    /// injected on open) — matching how <see cref="BrowseFavoritesAsync"/> surfaces it. The host
+    /// drills into it (or expands it to play), so it must carry the <c>vods:{login}</c> node identity,
+    /// not a live leaf.</summary>
     public SourceItem? GetFavorite(string itemId)
     {
         var login = LoginOf(itemId);
@@ -460,30 +480,56 @@ public sealed class TwitchSource :
         lock (_gate) if (!_favorites.ContainsKey(login)) return null;
 
         EnsureClient();
-        var live = _client!.GetLiveChannelAsync(login).GetAwaiter().GetResult();
-        if (live is not null) return ToSourceItem(live);
-
-        // Offline: surface an unplayable channel row.
+        // Theme the tile by current live state (red LIVE glyph), but the item is always a container.
+        var live = _client is not null
+            ? _client.GetLiveChannelAsync(login).GetAwaiter().GetResult()
+            : null;
+        var showLive = live is not null && _liveIndicator;
         TwFavorite? f;
         lock (_gate) f = _favorites.TryGetValue(login, out var rec) ? rec : null;
+        // Live preview when broadcasting, else most-recent VOD thumbnail, else stored avatar.
+        var thumb = _client is not null
+            ? ResolveChannelThumbAsync(login, live, f?.ThumbnailUrl, default).GetAwaiter().GetResult()
+            : f?.ThumbnailUrl;
+
         return new SourceItem
         {
             SourceInstanceId = InstanceId,
-            ItemId = login,
-            Title = f?.Title ?? login,
-            Subtitle = "Offline",
-            ThumbnailUrl = f?.ThumbnailUrl,
-            IsLiveStream = true,
-            IsPlayable = false,
-            SourceState = new TwState($"https://www.twitch.tv/{login}", IsLive: true, login),
+            ItemId = $"vods:{login}",
+            Title = showLive
+                ? $"{live!.ChannelName ?? f?.Title ?? login} — ● LIVE"
+                : (live?.ChannelName ?? f?.Title ?? login),
+            ThumbnailUrl = thumb,
+            IsContainer = true,
+            SourceState = new TwNode(TwNodeKind.ChannelVods, login),
         };
     }
 
+    /// <summary>
+    /// Rebuilds a playable item from any persisted id (typically a live row's channel login), with no
+    /// prior browse state — used to re-resolve a live queue entry after a restart. Reflects the
+    /// channel's <em>current</em> live feed (not whatever was live when it was queued), or <c>null</c>
+    /// if the channel isn't live now.
+    /// </summary>
+    public SourceItem? RebuildPlayable(string itemId)
+    {
+        var login = LoginOf(itemId);
+        if (login is null) return null;
+
+        EnsureClient();
+        var live = _client!.GetLiveChannelAsync(login).GetAwaiter().GetResult();
+        return live is not null ? ToSourceItem(live) : null;
+    }
+
     // Maps a row's ItemId to its owning channel login: a live-stream row is already the login; a VOD
-    // row is resolved via the channel we saw it under. Falls back to treating the id AS a login.
+    // row is resolved via the channel we saw it under; a channel-VODs container id is "vods:{login}"
+    // (its stable form, which survives a restart when _seen is empty). Falls back to the id as a login.
     private string? LoginOf(string itemId)
     {
         if (string.IsNullOrEmpty(itemId)) return null;
+        // Channel container id carries the login directly (e.g. a favorited channel: "vods:foxcity…").
+        if (itemId.StartsWith("vods:", StringComparison.Ordinal))
+            return itemId["vods:".Length..];
         return ChannelLoginFor(itemId) ?? itemId;
     }
 
@@ -497,8 +543,22 @@ public sealed class TwitchSource :
             var path = FavoritesPath;
             if (!File.Exists(path)) return new Dictionary<string, TwFavorite>(StringComparer.OrdinalIgnoreCase);
             var list = JsonSerializer.Deserialize<List<TwFavorite>>(File.ReadAllText(path));
-            return (list ?? []).Where(f => !string.IsNullOrEmpty(f.Login))
-                .ToDictionary(f => f.Login, f => f, StringComparer.OrdinalIgnoreCase);
+            // Normalize the key to the bare channel login: a channel container was previously stored
+            // with its "vods:{login}" node id (an unreachable key that neither IsFavorite nor
+            // GetFavorite could match). Strip the prefix so the entry is canonical and self-heals on
+            // the next save. De-duplicate to the first record if both forms somehow exist.
+            var normalized = new Dictionary<string, TwFavorite>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in list ?? [])
+            {
+                if (string.IsNullOrEmpty(f.Login)) continue;
+                var login = f.Login.StartsWith("vods:", StringComparison.Ordinal)
+                    ? f.Login["vods:".Length..]
+                    : f.Login;
+                if (string.IsNullOrEmpty(login) || normalized.ContainsKey(login)) continue;
+                var title = f.Title.StartsWith("vods:", StringComparison.Ordinal) ? login : f.Title;
+                normalized[login] = f with { Login = login, Title = title };
+            }
+            return normalized;
         }
         catch (Exception ex)
         {

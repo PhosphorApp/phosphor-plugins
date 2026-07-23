@@ -54,7 +54,7 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
         try
         {
             var body = BuildDirectoryQuery("Just Chatting", 1, null);
-            using var resp = await PostAsync(body, ct);
+            using var resp = await PostAsync(body, ct).ConfigureAwait(false);
             if (resp.IsSuccessStatusCode) return (true, "Reachable.");
             return (false, $"Unexpected response: {(int)resp.StatusCode} {resp.ReasonPhrase}");
         }
@@ -69,8 +69,8 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
         string query, int limit = 30, [EnumeratorCancellation] CancellationToken ct = default)
     {
         var body = BuildChannelSearchQuery(query, limit);
-        using var resp = await PostAsync(body, ct);
-        var text = await resp.Content.ReadAsStringAsync(ct);
+        using var resp = await PostAsync(body, ct).ConfigureAwait(false);
+        var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
             _log?.Invoke($"Twitch search '{query}' failed {(int)resp.StatusCode}: {Trim(text, 200)}");
@@ -95,8 +95,8 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
         int limit, string? cursor, CancellationToken ct = default)
     {
         var body = BuildTopLiveQuery(limit, cursor);
-        using var resp = await PostAsync(body, ct);
-        var text = await resp.Content.ReadAsStringAsync(ct);
+        using var resp = await PostAsync(body, ct).ConfigureAwait(false);
+        var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
             _log?.Invoke($"Twitch top-live failed {(int)resp.StatusCode}: {Trim(text, 200)}");
@@ -113,8 +113,8 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
         int limit, string? cursor, CancellationToken ct = default)
     {
         var body = BuildTopCategoriesQuery(limit, cursor);
-        using var resp = await PostAsync(body, ct);
-        var text = await resp.Content.ReadAsStringAsync(ct);
+        using var resp = await PostAsync(body, ct).ConfigureAwait(false);
+        var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
             _log?.Invoke($"Twitch top-categories failed {(int)resp.StatusCode}: {Trim(text, 200)}");
@@ -153,8 +153,8 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
         string categoryName, int limit, string? cursor, CancellationToken ct = default)
     {
         var body = BuildDirectoryQuery(categoryName, limit, cursor);
-        using var resp = await PostAsync(body, ct);
-        var text = await resp.Content.ReadAsStringAsync(ct);
+        using var resp = await PostAsync(body, ct).ConfigureAwait(false);
+        var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
             _log?.Invoke($"Twitch category '{categoryName}' failed {(int)resp.StatusCode}: {Trim(text, 200)}");
@@ -170,8 +170,8 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
     public async Task<TwitchVideo?> GetLiveChannelAsync(string login, CancellationToken ct = default)
     {
         var body = BuildUserStreamQuery(login);
-        using var resp = await PostAsync(body, ct);
-        var text = await resp.Content.ReadAsStringAsync(ct);
+        using var resp = await PostAsync(body, ct).ConfigureAwait(false);
+        var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
             _log?.Invoke($"Twitch channel '{login}' failed {(int)resp.StatusCode}: {Trim(text, 200)}");
@@ -187,7 +187,12 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
             return null; // offline
 
         var title = TryGetPath(user, out var bt, "broadcastSettings", "title") ? bt.GetString() : null;
-        var thumb = user.TryGetProperty("profileImageURL", out var pi) ? pi.GetString() : null;
+        // Prefer the LIVE stream preview (the current-broadcast video frame Twitch refreshes every few
+        // minutes) so a channel's thumbnail reflects what's actually on now; fall back to the static
+        // profile avatar when the preview is absent.
+        var preview = stream.TryGetProperty("previewImageURL", out var pv) ? pv.GetString() : null;
+        var profile = user.TryGetProperty("profileImageURL", out var pi) ? pi.GetString() : null;
+        var thumb = string.IsNullOrEmpty(preview) ? profile : preview;
         var started = ParseDate(stream, "createdAt");
 
         // Key by the STABLE login (not the ephemeral per-broadcast stream id) so a favorited channel
@@ -207,8 +212,8 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
         string login, int limit, string? cursor, CancellationToken ct = default)
     {
         var body = BuildChannelVideosQuery(login, limit, cursor);
-        using var resp = await PostAsync(body, ct);
-        var text = await resp.Content.ReadAsStringAsync(ct);
+        using var resp = await PostAsync(body, ct).ConfigureAwait(false);
+        var text = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!resp.IsSuccessStatusCode)
         {
             _log?.Invoke($"Twitch VODs '{login}' failed {(int)resp.StatusCode}: {Trim(text, 200)}");
@@ -220,6 +225,17 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
             return new TwitchVideoPage([], false, null);
 
         return ParseVideosConnection(conn, login);
+    }
+
+    /// <summary>
+    /// Returns the thumbnail of a channel's most recent VOD (its latest past broadcast), or
+    /// <c>null</c> if the channel has no VODs. Used as an offline fallback thumbnail for a favorited
+    /// channel — "first thumbnail wins" over the static avatar when the channel isn't live.
+    /// </summary>
+    public async Task<string?> GetMostRecentVodThumbnailAsync(string login, CancellationToken ct = default)
+    {
+        var page = await GetChannelVideosPageAsync(login, 1, null, ct).ConfigureAwait(false);
+        return page.Items.Count > 0 ? page.Items[0].ThumbnailUrl : null;
     }
 
     // ── Request plumbing ─────────────────────────────────────────────────────────
@@ -299,7 +315,7 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
             displayName
             profileImageURL(width: 150)
             broadcastSettings { title }
-            stream { id type viewersCount createdAt }
+            stream { id type viewersCount createdAt previewImageURL(width: 320, height: 180) }
           }
         }
         """);
