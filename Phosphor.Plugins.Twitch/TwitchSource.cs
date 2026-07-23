@@ -217,7 +217,7 @@ public sealed class TwitchSource :
         // SourceItem.IsLiveStream. This is why a favorited channel opens its videos rather than playing.
         if (node.Kind == TwNodeKind.ChannelVods && node.Login is { } chLogin && offset == 0)
         {
-            var live = await _client!.GetLiveChannelAsync(chLogin, ct);
+            var live = await _client!.GetLiveChannelAsync(chLogin, ct).ConfigureAwait(false);
             if (live is not null)
                 items.Insert(0, ToSourceItem(live, showLiveBadge: _liveIndicator));
         }
@@ -299,7 +299,7 @@ public sealed class TwitchSource :
         foreach (var login in channels)
         {
             ct.ThrowIfCancellationRequested();
-            var live = await _client!.GetLiveChannelAsync(login, ct);
+            var live = await _client!.GetLiveChannelAsync(login, ct).ConfigureAwait(false);
             if (live is not null)
                 liveItems.Add(ToSourceItem(live, showLiveBadge: _liveIndicator));
 
@@ -353,9 +353,9 @@ public sealed class TwitchSource :
             // channel is broadcasting); the actual live stream is injected as the first item inside the
             // channel's collection (see BrowsePageAsync). The live decoration honors the same
             // "Show live indicator" setting as the in-collection badge, so the two stay consistent.
-            var live = await _client!.GetLiveChannelAsync(f.Login, ct);
+            var live = await _client!.GetLiveChannelAsync(f.Login, ct).ConfigureAwait(false);
             var showLive = live is not null && _liveIndicator;
-            var thumb = await ResolveChannelThumbAsync(f.Login, live, f.ThumbnailUrl, ct);
+            var thumb = await ResolveChannelThumbAsync(f.Login, live, f.ThumbnailUrl, ct).ConfigureAwait(false);
             cats.Add(new SourceCategory
             {
                 SourceInstanceId = InstanceId,
@@ -381,7 +381,7 @@ public sealed class TwitchSource :
     {
         if (live?.ThumbnailUrl is { Length: > 0 } livePreview)
             return livePreview;
-        var vodThumb = await _client!.GetMostRecentVodThumbnailAsync(login, ct);
+        var vodThumb = await _client!.GetMostRecentVodThumbnailAsync(login, ct).ConfigureAwait(false);
         return !string.IsNullOrEmpty(vodThumb) ? vodThumb : fallback;
     }
 
