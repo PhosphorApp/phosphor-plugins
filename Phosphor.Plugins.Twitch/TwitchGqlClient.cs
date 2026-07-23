@@ -192,7 +192,7 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
         // profile avatar when the preview is absent.
         var preview = stream.TryGetProperty("previewImageURL", out var pv) ? pv.GetString() : null;
         var profile = user.TryGetProperty("profileImageURL", out var pi) ? pi.GetString() : null;
-        var thumb = string.IsNullOrEmpty(preview) ? profile : preview;
+        var thumb = string.IsNullOrEmpty(preview) ? profile : BustLivePreview(preview);
         var started = ParseDate(stream, "createdAt");
 
         // Key by the STABLE login (not the ephemeral per-broadcast stream id) so a favorited channel
@@ -423,7 +423,7 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
             $"https://www.twitch.tv/{login}",
             IsLive: true,
             Duration: null,
-            ThumbnailUrl: thumb,
+            ThumbnailUrl: BustLivePreview(thumb),
             ChannelName: display ?? login,
             PublishedAt: started,
             ChannelLogin: login);
@@ -460,6 +460,23 @@ public sealed class TwitchGqlClient(HttpClient http, Action<string>? log = null)
         JsonSerializer.Serialize(new { query });
 
     private static string JsonStr(string s) => JsonSerializer.Serialize(s);
+
+    /// <summary>
+    /// Appends a time-bucketed cache-busting query param to a LIVE preview URL. Twitch's live
+    /// <c>previewImageURL</c> is a <em>stable</em> URL whose bytes mutate server-side (and is often a
+    /// blank placeholder in the first moments of a broadcast). WPF/its disk cache key on the URL, so a
+    /// once-blank frame would stick for the whole process. A token that only changes every few minutes
+    /// keeps the URL stable <em>within</em> a window (so caches still hit) while rolling over so a
+    /// stale/blank preview self-heals shortly after. Null/empty and non-Twitch-CDN URLs pass through.
+    /// </summary>
+    private static string? BustLivePreview(string? url)
+    {
+        if (string.IsNullOrEmpty(url)) return url;
+        // ~2-minute buckets: fresh enough to recover a blank quickly, coarse enough to stay cacheable.
+        var bucket = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 120;
+        var sep = url.Contains('?') ? '&' : '?';
+        return $"{url}{sep}_pb={bucket}";
+    }
 
     private static DateTimeOffset? ParseDate(JsonElement node, string prop) =>
         node.TryGetProperty(prop, out var d) && d.ValueKind == JsonValueKind.String &&
