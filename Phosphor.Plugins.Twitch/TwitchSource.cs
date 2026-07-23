@@ -31,7 +31,7 @@ internal sealed record TwFavorite(string Login, string Title, string? ThumbnailU
 public sealed class TwitchSource :
     IPhosphorSource, IBrowsable, IPagedBrowsable, ITextSearchCapable, IPlayableResolver,
     IDeferredStreamResolution, IFavoritable, IConnectionTestable, IResultCachePolicy,
-    IReplayableById
+    IReplayableById, IContainerPlayPolicy
 {
     private static readonly HttpClient SharedHttpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
 
@@ -520,6 +520,12 @@ public sealed class TwitchSource :
         var live = _client!.GetLiveChannelAsync(login).GetAwaiter().GetResult();
         return live is not null ? ToSourceItem(live) : null;
     }
+
+    // A Twitch channel is a recency feed, not a curated set: "Play all" should play what's live now
+    // (or the most recent VOD), never queue the entire back-catalog.
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container) => ContainerPlayAll.PlayLatestOnly;
+
+    public string? PlayAllLabel(SourceItem container) => "Play latest";
 
     // Maps a row's ItemId to its owning channel login: a live-stream row is already the login; a VOD
     // row is resolved via the channel we saw it under; a channel-VODs container id is "vods:{login}"
