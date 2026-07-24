@@ -358,7 +358,7 @@ public sealed class SiriusXmSource :
             var ids = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path));
             return new HashSet<string>(ids ?? [], StringComparer.Ordinal);
         }
-        catch (Exception ex) { Log($"SXM: favorites read failed: {ex.Message}"); return new HashSet<string>(StringComparer.Ordinal); }
+        catch (Exception ex) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: favorites read failed: {ex.Message}"); return new HashSet<string>(StringComparer.Ordinal); }
     }
 
     private void SaveFavorites()
@@ -369,7 +369,7 @@ public sealed class SiriusXmSource :
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, JsonSerializer.Serialize(_favorites.ToList()));
         }
-        catch (Exception ex) { Log($"SXM: favorites write failed: {ex.Message}"); }
+        catch (Exception ex) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: favorites write failed: {ex.Message}"); }
     }
 
     // ── IHideable ────────────────────────────────────────────────────────────────
@@ -462,7 +462,7 @@ public sealed class SiriusXmSource :
             var ids = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path));
             return new HashSet<string>(ids ?? [], StringComparer.Ordinal);
         }
-        catch (Exception ex) { Log($"SXM: hidden read failed: {ex.Message}"); return new HashSet<string>(StringComparer.Ordinal); }
+        catch (Exception ex) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: hidden read failed: {ex.Message}"); return new HashSet<string>(StringComparer.Ordinal); }
     }
 
     private void SaveHidden()
@@ -473,7 +473,7 @@ public sealed class SiriusXmSource :
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, JsonSerializer.Serialize(_hidden.ToList()));
         }
-        catch (Exception ex) { Log($"SXM: hidden write failed: {ex.Message}"); }
+        catch (Exception ex) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: hidden write failed: {ex.Message}"); }
     }
 
     // ── IPlayableResolver ───────────────────────────────────────────────────────
@@ -483,14 +483,14 @@ public sealed class SiriusXmSource :
     {
         var channel = item.SourceState as SxmChannel
             ?? (await EnsureChannelsAsync(ct)).FirstOrDefault(c => c.Id == item.ItemId);
-        if (channel == null) { Log($"SXM: channel '{item.ItemId}' not found."); return null; }
+        if (channel == null) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: channel '{item.ItemId}' not found."); return null; }
 
         var client = await EnsureClientAsync(ct);
         if (client == null) return null;
 
         var proxy = EnsureProxy(client);
         var localUrl = await proxy.SetChannelAsync(channel, ct);
-        if (localUrl == null) { Log($"SXM: failed to resolve stream for '{channel.Id}'."); return null; }
+        if (localUrl == null) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: failed to resolve stream for '{channel.Id}'."); return null; }
 
         return new ResolvedStream(
             StreamTransport.Http,
@@ -515,7 +515,7 @@ public sealed class SiriusXmSource :
 
         if (!IsConfigured) return null;
         client = new SxmClient(_username, _password, _region, Log);
-        if (!await client.AuthenticateAsync(ct)) { Log("SXM: authentication failed."); return null; }
+        if (!await client.AuthenticateAsync(ct)) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, "SXM: authentication failed."); return null; }
         lock (_gate) _client = client;
         return client;
     }
@@ -562,7 +562,7 @@ public sealed class SiriusXmSource :
             if (cache is null || cache.Version != LineupCacheVersion) return null;
             return cache.Channels is { Count: > 0 } ? cache.Channels : null;
         }
-        catch (Exception ex) { Log($"SXM: lineup cache read failed: {ex.Message}"); return null; }
+        catch (Exception ex) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: lineup cache read failed: {ex.Message}"); return null; }
     }
 
     private void SaveLineupCache(IReadOnlyList<SxmChannel> channels)
@@ -573,7 +573,7 @@ public sealed class SiriusXmSource :
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, JsonSerializer.Serialize(new LineupCache(LineupCacheVersion, DateTimeOffset.UtcNow, channels)));
         }
-        catch (Exception ex) { Log($"SXM: lineup cache write failed: {ex.Message}"); }
+        catch (Exception ex) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: lineup cache write failed: {ex.Message}"); }
     }
 
     // Bump when the SxmChannel shape changes so old caches are rejected (tester-only: no migration).
@@ -601,6 +601,9 @@ public sealed class SiriusXmSource :
     }
 
     private void Log(string message) => _host?.Log(message);
+
+    private void Log(Phosphor.Plugin.Abstractions.LogLevel level, string message) =>
+        _host?.Log(level, message);
 
     private static string? Get(IReadOnlyDictionary<string, string?> values, string key) =>
         values.TryGetValue(key, out var v) ? v : null;
