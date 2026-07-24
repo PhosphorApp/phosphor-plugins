@@ -10,11 +10,11 @@ namespace Phosphor;
 /// </summary>
 public static class DebugLog
 {
-    public static void Log(string message) => Trace.WriteLine($"[YouTube] {message}");
+    public static void Log(string message) => Trace.WriteLine($"[GENERIC] [YouTube] {message}");
 
     public static void Log(string category, string message) =>
-        Trace.WriteLine($"[YouTube:{category}] {message}");
+        Trace.WriteLine($"[GENERIC] [YouTube:{category}] {message}");
 
     public static void LogException(string context, Exception? ex) =>
-        Trace.WriteLine($"[YouTube:EXC] {context}: {ex?.Message}");
+        Trace.WriteLine($"[Error] [YouTube:EXC] {context}: {ex?.Message}");
 }

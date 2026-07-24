@@ -27,23 +27,23 @@ public static class DebugLog
     /// <summary>Minimum level written; verbose per-item Trace diagnostics are dropped by default.</summary>
     public static LogLevel MinimumLevel { get; set; } = LogLevel.Debug;
 
-    public static void Log(string message) => Trace.WriteLine($"[Plex] {message}");
+    public static void Log(string message) => Trace.WriteLine($"[GENERIC] [Plex] {message}");
 
     public static void Log(string category, string message) =>
-        Trace.WriteLine($"[Plex:{category}] {message}");
+        Trace.WriteLine($"[GENERIC] [Plex:{category}] {message}");
 
     public static void Log(LogLevel level, string message)
     {
         if (level < MinimumLevel) return;
-        Trace.WriteLine($"[Plex] {message}");
+        Trace.WriteLine($"[{level}] [Plex] {message}");
     }
 
     public static void Log(LogLevel level, string category, string message)
     {
         if (level < MinimumLevel) return;
-        Trace.WriteLine($"[Plex:{category}] {message}");
+        Trace.WriteLine($"[{level}] [Plex:{category}] {message}");
     }
 
     public static void LogException(string context, Exception? ex) =>
-        Trace.WriteLine($"[Plex:EXC] {context}: {ex?.Message}");
+        Trace.WriteLine($"[Error] [Plex:EXC] {context}: {ex?.Message}");
 }
