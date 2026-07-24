@@ -40,7 +40,11 @@ public class PlexService
 
     private static void DiagLog(string message)
     {
-        DebugLog.Log("Plex", message);
+        // Per-item Plex diagnostics (audio-stream selection dump, chapter probes, compilation-album
+        // search). These fire once per track resolve and historically dominated the log, so they log
+        // at Trace — silent at the default verbosity, available when investigating. Genuine failures
+        // are logged directly at Warning at their call sites instead of through here.
+        DebugLog.Log(LogLevel.Trace, "Plex", message);
     }
 
     /// <summary>
@@ -54,7 +58,7 @@ public class PlexService
         _serverUrl = serverUrl.TrimEnd('/');
         _token = token;
         _stereoAudio = stereoAudio;
-        DebugLog.Log("Plex", $"Configured: server={_serverUrl} stereoAudio={_stereoAudio}");
+        DebugLog.Log(LogLevel.Info, "Plex", $"Configured: server={_serverUrl} stereoAudio={_stereoAudio}");
     }
 
     /// <summary>
@@ -100,7 +104,7 @@ public class PlexService
         }
         catch (Exception ex)
         {
-            DiagLog($"GetChaptersAsync({ratingKey}) error: {ex.Message}");
+            DebugLog.Log(LogLevel.Warning, "Plex", $"GetChaptersAsync({ratingKey}) error: {ex.Message}");
         }
         return null;
     }
@@ -235,7 +239,7 @@ public class PlexService
             {
                 // Some servers/library configs may not expose the artist.title filter field; the
                 // title-only results still stand.
-                DiagLog($"SearchLibraryWithFiltersAsync artist.title filter failed: {ex.Message}");
+                DebugLog.Log(LogLevel.Warning, "Plex", $"SearchLibraryWithFiltersAsync artist.title filter failed: {ex.Message}");
                 byArtist = new List<VideoItem>();
             }
 
@@ -329,7 +333,7 @@ public class PlexService
             }
             catch (Exception ex)
             {
-                DiagLog($"Error searching for compilation albums: {ex.Message}");
+                DebugLog.Log(LogLevel.Warning, "Plex", $"Error searching for compilation albums: {ex.Message}");
                 // Continue with just the direct children if search fails
             }
         }
