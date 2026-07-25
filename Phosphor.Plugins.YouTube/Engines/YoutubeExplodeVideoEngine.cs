@@ -12,6 +12,12 @@ namespace Phosphor.Video;
 public sealed class YoutubeExplodeVideoEngine : IVideoEngine
 {
     private readonly YoutubeClient _youtube = new();
+    private readonly PluginLog? _log;
+
+    public YoutubeExplodeVideoEngine(PluginLog? log = null)
+    {
+        _log = log;
+    }
 
     /// <summary>Always available — runs in-process.</summary>
     public bool IsAvailable => true;
@@ -25,7 +31,7 @@ public sealed class YoutubeExplodeVideoEngine : IVideoEngine
     {
         var manifest = await _youtube.Videos.Streams.GetManifestAsync(videoId, ct);
 
-        var audioStream = StreamSelector.SelectAudio(manifest, preferStereo);
+        var audioStream = StreamSelector.SelectAudio(manifest, preferStereo, _log);
 
         // Audio-only mode: stream just audio. If no audio stream is available, fall
         // through to the video path (mirrors the original BackglassWindow behavior).
@@ -34,7 +40,7 @@ public sealed class YoutubeExplodeVideoEngine : IVideoEngine
             return new VideoStreams(VideoStreamKind.AudioOnly, audioStream.Url, null, "");
         }
 
-        var videoStream = StreamSelector.SelectVideo(manifest, quality);
+        var videoStream = StreamSelector.SelectVideo(manifest, quality, _log);
 
         if (videoStream != null && audioStream != null)
         {
@@ -47,7 +53,7 @@ public sealed class YoutubeExplodeVideoEngine : IVideoEngine
         }
 
         // Fallback to muxed if separate streams aren't available.
-        var muxed = StreamSelector.SelectMuxed(manifest, quality);
+        var muxed = StreamSelector.SelectMuxed(manifest, quality, _log);
         if (muxed == null) return null;
 
         var muxedResolution = $"{muxed.VideoResolution.Width}x{muxed.VideoResolution.Height}";
@@ -62,8 +68,8 @@ public sealed class YoutubeExplodeVideoEngine : IVideoEngine
         CancellationToken ct = default)
     {
         var manifest = await _youtube.Videos.Streams.GetManifestAsync(videoId, ct);
-        var videoStream = StreamSelector.SelectVideo(manifest, quality);
-        var audioStream = StreamSelector.SelectAudio(manifest, preferStereo);
+        var videoStream = StreamSelector.SelectVideo(manifest, quality, _log);
+        var audioStream = StreamSelector.SelectAudio(manifest, preferStereo, _log);
 
         if (videoStream == null || audioStream == null) return null;
 

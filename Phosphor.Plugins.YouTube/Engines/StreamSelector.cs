@@ -1,4 +1,5 @@
 using YoutubeExplode.Videos.Streams;
+using Phosphor.Plugin.Abstractions;
 
 namespace Phosphor;
 
@@ -16,16 +17,16 @@ internal static class StreamSelector
         _ => int.MaxValue
     };
 
-    private static void LogVideoStream(string label, IVideoStreamInfo stream)
+    private static void LogVideoStream(PluginLog? log, string label, IVideoStreamInfo stream)
     {
-        DebugLog.Log(LogLevel.Trace, "StreamSelector",
+        log?.Invoke(LogLevel.Trace, "StreamSelector",
             $"{label}: {stream.VideoQuality.Label} {stream.VideoResolution.Width}x{stream.VideoResolution.Height} " +
             $"codec={stream.VideoCodec} bitrate={stream.Bitrate} size={stream.Size} container={stream.Container}");
     }
 
-    private static void LogAudioStream(string label, IAudioStreamInfo stream)
+    private static void LogAudioStream(PluginLog? log, string label, IAudioStreamInfo stream)
     {
-        DebugLog.Log(LogLevel.Trace, "StreamSelector",
+        log?.Invoke(LogLevel.Trace, "StreamSelector",
             $"{label}: codec={stream.AudioCodec} bitrate={stream.Bitrate} size={stream.Size} container={stream.Container}");
     }
 
@@ -33,7 +34,7 @@ internal static class StreamSelector
     /// Picks the best video-only stream at or below the preferred quality ceiling.
     /// Falls back to the lowest available if nothing is at or below the cap.
     /// </summary>
-    public static VideoOnlyStreamInfo? SelectVideo(StreamManifest manifest, VideoQualityPreference pref)
+    public static VideoOnlyStreamInfo? SelectVideo(StreamManifest manifest, VideoQualityPreference pref, PluginLog? log = null)
     {
         var streams = manifest.GetVideoOnlyStreams();
         int cap = MaxHeight(pref);
@@ -51,7 +52,7 @@ internal static class StreamSelector
             .FirstOrDefault();
 
         if (result != null)
-            LogVideoStream($"Selected video-only (pref={pref}, cap={cap}p)", result);
+            LogVideoStream(log, $"Selected video-only (pref={pref}, cap={cap}p)", result);
 
         return result;
     }
@@ -70,7 +71,7 @@ internal static class StreamSelector
     /// (which excludes YouTube's surround/5.1 tracks), falling back to the overall
     /// highest bitrate if no stream fits under the ceiling.
     /// </summary>
-    public static AudioOnlyStreamInfo? SelectAudio(StreamManifest manifest, bool preferStereo = false)
+    public static AudioOnlyStreamInfo? SelectAudio(StreamManifest manifest, bool preferStereo = false, PluginLog? log = null)
     {
         AudioOnlyStreamInfo? result;
 
@@ -90,7 +91,7 @@ internal static class StreamSelector
         }
 
         if (result != null)
-            LogAudioStream($"Selected audio-only (stereo={preferStereo})", result);
+            LogAudioStream(log, $"Selected audio-only (stereo={preferStereo})", result);
 
         return result;
     }
@@ -98,7 +99,7 @@ internal static class StreamSelector
     /// <summary>
     /// Picks the best muxed stream at or below the preferred quality ceiling.
     /// </summary>
-    public static MuxedStreamInfo? SelectMuxed(StreamManifest manifest, VideoQualityPreference pref)
+    public static MuxedStreamInfo? SelectMuxed(StreamManifest manifest, VideoQualityPreference pref, PluginLog? log = null)
     {
         var streams = manifest.GetMuxedStreams();
         int cap = MaxHeight(pref);
@@ -115,7 +116,7 @@ internal static class StreamSelector
 
         if (result != null)
         {
-            DebugLog.Log(LogLevel.Trace, "StreamSelector",
+            log?.Invoke(LogLevel.Trace, "StreamSelector",
                 $"Selected muxed (pref={pref}, cap={cap}p): {result.VideoQuality.Label} {result.VideoResolution.Width}x{result.VideoResolution.Height} " +
                 $"videoCodec={result.VideoCodec} audioCodec={result.AudioCodec} bitrate={result.Bitrate} size={result.Size} container={result.Container}");
         }

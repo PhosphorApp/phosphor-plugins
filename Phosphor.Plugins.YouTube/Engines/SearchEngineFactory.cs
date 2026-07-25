@@ -1,4 +1,6 @@
 using System.Net.Http;
+using Phosphor;
+using Phosphor.Plugin.Abstractions;
 
 namespace Phosphor.Search;
 
@@ -8,11 +10,11 @@ namespace Phosphor.Search;
 /// </summary>
 public static class SearchEngineFactory
 {
-    public static ISearchEngine Create(SearchEngineKind kind, HttpClient? http = null)
+    public static ISearchEngine Create(SearchEngineKind kind, HttpClient? http = null, PluginLog? log = null)
     {
         ISearchEngine engine = kind switch
         {
-            SearchEngineKind.YtDlp => new YtDlpSearchEngine(),
+            SearchEngineKind.YtDlp => new YtDlpSearchEngine(log: log),
             _ => new YoutubeExplodeSearchEngine(http),
         };
 
@@ -20,7 +22,7 @@ public static class SearchEngineFactory
         // back to the always-available in-process engine so search never hard-fails.
         if (!engine.IsAvailable)
         {
-            DebugLog.Log(LogLevel.Warning, "SearchEngine", $"{kind} unavailable — falling back to YoutubeExplode");
+            log?.Invoke(LogLevel.Warning, "SearchEngine", $"{kind} unavailable — falling back to YoutubeExplode");
             return new YoutubeExplodeSearchEngine(http);
         }
 

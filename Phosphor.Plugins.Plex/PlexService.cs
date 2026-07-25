@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net.Http;
 using System.Text.Json;
+using Phosphor.Plugin.Abstractions;
 
 namespace Phosphor;
 
@@ -14,6 +15,14 @@ public class PlexService
     private string _serverUrl = "";
     private string _token = "";
     private bool _stereoAudio;
+
+    /// <summary>
+    /// Diagnostics sink, supplied by <c>PlexSource</c> once the host is available. Formats
+    /// <c>(level, category, message)</c> and routes to <see cref="IPluginHost.Log(LogLevel, string)"/>
+    /// so Plex logs land in the host log file and honor the verbosity setting (Path A). Defaults to a
+    /// no-op so calls made before the host is wired (or in tests) are harmless.
+    /// </summary>
+    public Action<LogLevel, string, string> Log { get; set; } = static (_, _, _) => { };
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_serverUrl) && !string.IsNullOrWhiteSpace(_token);
 
@@ -38,13 +47,13 @@ public class PlexService
             + $"&X-Plex-Token={_token}";
     }
 
-    private static void DiagLog(string message)
+    private void DiagLog(string message)
     {
         // Per-item Plex diagnostics (audio-stream selection dump, chapter probes, compilation-album
         // search). These fire once per track resolve and historically dominated the log, so they log
         // at Trace — silent at the default verbosity, available when investigating. Genuine failures
         // are logged directly at Warning at their call sites instead of through here.
-        DebugLog.Log(LogLevel.Trace, "Plex", message);
+        Log(LogLevel.Trace, "Plex", message);
     }
 
     /// <summary>
@@ -58,7 +67,7 @@ public class PlexService
         _serverUrl = serverUrl.TrimEnd('/');
         _token = token;
         _stereoAudio = stereoAudio;
-        DebugLog.Log(LogLevel.Info, "Plex", $"Configured: server={_serverUrl} stereoAudio={_stereoAudio}");
+        Log(LogLevel.Info, "Plex", $"Configured: server={_serverUrl} stereoAudio={_stereoAudio}");
     }
 
     /// <summary>
@@ -104,7 +113,7 @@ public class PlexService
         }
         catch (Exception ex)
         {
-            DebugLog.Log(LogLevel.Warning, "Plex", $"GetChaptersAsync({ratingKey}) error: {ex.Message}");
+            Log(LogLevel.Warning, "Plex", $"GetChaptersAsync({ratingKey}) error: {ex.Message}");
         }
         return null;
     }
@@ -239,7 +248,7 @@ public class PlexService
             {
                 // Some servers/library configs may not expose the artist.title filter field; the
                 // title-only results still stand.
-                DebugLog.Log(LogLevel.Warning, "Plex", $"SearchLibraryWithFiltersAsync artist.title filter failed: {ex.Message}");
+                Log(LogLevel.Warning, "Plex", $"SearchLibraryWithFiltersAsync artist.title filter failed: {ex.Message}");
                 byArtist = new List<VideoItem>();
             }
 
@@ -333,7 +342,7 @@ public class PlexService
             }
             catch (Exception ex)
             {
-                DebugLog.Log(LogLevel.Warning, "Plex", $"Error searching for compilation albums: {ex.Message}");
+                Log(LogLevel.Warning, "Plex", $"Error searching for compilation albums: {ex.Message}");
                 // Continue with just the direct children if search fails
             }
         }

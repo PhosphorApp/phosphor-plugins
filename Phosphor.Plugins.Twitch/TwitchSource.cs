@@ -114,7 +114,7 @@ public sealed class TwitchSource :
     private void EnsureClient()
     {
         var http = _host?.HttpClient ?? SharedHttpClient;
-        _client ??= new TwitchGqlClient(http, _host is { } h ? h.Log : null);
+        _client ??= new TwitchGqlClient(http, _host is { } h ? (s => h.Log(LogLevel.Debug, s)) : (Action<string>?)null);
     }
 
     private void EnsureResolver()
@@ -125,7 +125,7 @@ public sealed class TwitchSource :
             var local = Path.Combine(AppContext.BaseDirectory, "yt-dlp.exe");
             path = File.Exists(local) ? local : "yt-dlp";
         }
-        _resolver = new YtDlpResolver(path, _host is { } h ? h.Log : null);
+        _resolver = new YtDlpResolver(path, _host is { } h ? (s => h.Log(LogLevel.Debug, s)) : (Action<string>?)null);
     }
 
     // ── IResultCachePolicy ─────────────────────────────────────────────────────
@@ -568,7 +568,7 @@ public sealed class TwitchSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"Twitch: favorites read failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Twitch: favorites read failed: {ex.Message}");
             return new Dictionary<string, TwFavorite>(StringComparer.OrdinalIgnoreCase);
         }
     }
@@ -583,7 +583,7 @@ public sealed class TwitchSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"Twitch: favorites write failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Twitch: favorites write failed: {ex.Message}");
         }
     }
 

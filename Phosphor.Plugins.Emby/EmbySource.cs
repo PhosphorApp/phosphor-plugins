@@ -98,7 +98,7 @@ public sealed class EmbySource :
         // InitializeAsync, so _host can be null. Fall back to a shared HttpClient + no-op log so the
         // client still works for those one-off calls; the real host client is used once initialized.
         var http = _host?.HttpClient ?? SharedHttpClient;
-        var log = _host is { } h ? h.Log : (Action<string>?)null;
+        Action<string>? log = _host is { } h ? (s => h.Log(LogLevel.Debug, s)) : null;
         _client ??= new EmbyClient(http, StableDeviceId(), log);
         _client.Configure(_serverUrl, _username, _password, _stereoAudio);
     }
@@ -138,7 +138,7 @@ public sealed class EmbySource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"EmbySource: GetViews failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"EmbySource: GetViews failed — {ex.Message}");
             yield break;
         }
 
@@ -203,7 +203,7 @@ public sealed class EmbySource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"EmbySource: Browse '{parentId}' failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"EmbySource: Browse '{parentId}' failed — {ex.Message}");
             return new BrowseResult();
         }
 
@@ -266,7 +266,7 @@ public sealed class EmbySource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"EmbySource: music browse '{state.ItemId}' (level {state.MusicLevel}) failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"EmbySource: music browse '{state.ItemId}' (level {state.MusicLevel}) failed — {ex.Message}");
             return new BrowseResult();
         }
     }
@@ -286,7 +286,7 @@ public sealed class EmbySource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"EmbySource: Search '{query}' failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"EmbySource: Search '{query}' failed — {ex.Message}");
             yield break;
         }
 
@@ -319,14 +319,14 @@ public sealed class EmbySource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"EmbySource: resolve auth failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"EmbySource: resolve auth failed — {ex.Message}");
             return null;
         }
 
         // Note: the stereo downmix is driven by the instance's Stereo audio setting inside the client;
         // prefs.PreferStereo is an additional host hint (both point the same direction on a cab).
         var url = _client.GetStreamUrl(itemId, audioOnly);
-        _host?.Log($"EmbySource: resolved {(audioOnly ? "audio" : "video")} stream → {url}");
+        _host?.Log(LogLevel.Debug, $"EmbySource: resolved {(audioOnly ? "audio" : "video")} stream → {url}");
 
         var layout = audioOnly ? StreamLayout.AudioOnly : StreamLayout.Muxed;
         return new ResolvedStream(StreamTransport.Http, layout, url);
@@ -348,7 +348,7 @@ public sealed class EmbySource :
             }
             catch (Exception ex)
             {
-                _host?.Log($"EmbySource: GetChapters '{itemId}' failed — {ex.Message}");
+                _host?.Log(LogLevel.Warning, $"EmbySource: GetChapters '{itemId}' failed — {ex.Message}");
             }
         }
 
@@ -434,7 +434,7 @@ public sealed class EmbySource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"EmbySource: config GetViews failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"EmbySource: config GetViews failed — {ex.Message}");
             return new ConfigSelection([]);
         }
 
@@ -617,7 +617,7 @@ public sealed class EmbySource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"Emby: favorites read failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Emby: favorites read failed: {ex.Message}");
             return new Dictionary<string, EmbyFavorite>(StringComparer.Ordinal);
         }
     }
@@ -632,7 +632,7 @@ public sealed class EmbySource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"Emby: favorites write failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Emby: favorites write failed: {ex.Message}");
         }
     }
 }

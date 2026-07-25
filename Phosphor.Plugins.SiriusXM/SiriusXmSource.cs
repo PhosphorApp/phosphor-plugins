@@ -92,7 +92,7 @@ public sealed class SiriusXmSource :
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            var client = new SxmClient(_username, _password, _region, Log);
+            var client = new SxmClient(_username, _password, _region, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s));
             if (!await client.AuthenticateAsync(ct))
                 return new ConnectionTestResult(false, "Login failed — check username/password.", sw.Elapsed);
             var channels = await client.GetChannelsAsync(ct);
@@ -258,7 +258,7 @@ public sealed class SiriusXmSource :
 
     private SxmCategoryMap? _categoryMap;
     private SxmCategoryMap CategoryMap =>
-        _categoryMap ??= SxmCategoryMap.Load(_host?.InstanceCacheDirectory, Log);
+        _categoryMap ??= SxmCategoryMap.Load(_host?.InstanceCacheDirectory, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s));
 
     // ── ITextSearchCapable ──────────────────────────────────────────────────────
 
@@ -514,7 +514,7 @@ public sealed class SiriusXmSource :
         if (client is { IsAuthenticated: true }) return client;
 
         if (!IsConfigured) return null;
-        client = new SxmClient(_username, _password, _region, Log);
+        client = new SxmClient(_username, _password, _region, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s));
         if (!await client.AuthenticateAsync(ct)) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, "SXM: authentication failed."); return null; }
         lock (_gate) _client = client;
         return client;
@@ -585,7 +585,7 @@ public sealed class SiriusXmSource :
         lock (_gate)
         {
             if (_proxy is { IsRunning: true }) return _proxy;
-            _proxy = new SxmProxy(client, _proxyPort, Log);
+            _proxy = new SxmProxy(client, _proxyPort, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s));
             _proxy.Start();
             return _proxy;
         }
@@ -599,8 +599,6 @@ public sealed class SiriusXmSource :
         lock (_gate) { proxy = _proxy; _proxy = null; }
         try { proxy?.Dispose(); } catch { /* best-effort */ }
     }
-
-    private void Log(string message) => _host?.Log(message);
 
     private void Log(Phosphor.Plugin.Abstractions.LogLevel level, string message) =>
         _host?.Log(level, message);

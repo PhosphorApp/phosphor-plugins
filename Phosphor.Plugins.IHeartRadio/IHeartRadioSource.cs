@@ -55,7 +55,7 @@ public sealed class IHeartRadioSource :
     // No settings to apply (empty schema).
     public void ApplySettings(IReadOnlyDictionary<string, string?> values) { }
 
-    private IHeartClient Client => _client ??= new IHeartClient(_host?.HttpClient ?? new HttpClient(), Log);
+    private IHeartClient Client => _client ??= new IHeartClient(_host?.HttpClient ?? new HttpClient(), s => Log(LogLevel.Debug, s));
 
     // ── IConnectionTestable ─────────────────────────────────────────────────────
 
@@ -551,7 +551,7 @@ public sealed class IHeartRadioSource :
             return list.Where(f => !string.IsNullOrEmpty(f.Id))
                        .ToDictionary(f => f.Id, f => f, StringComparer.Ordinal);
         }
-        catch (Exception ex) { Log($"iHeart: favorites read failed: {ex.Message}"); return new Dictionary<string, IHeartFavorite>(StringComparer.Ordinal); }
+        catch (Exception ex) { Log(LogLevel.Warning, $"iHeart: favorites read failed: {ex.Message}"); return new Dictionary<string, IHeartFavorite>(StringComparer.Ordinal); }
     }
 
     private void SaveFavorites()
@@ -562,7 +562,7 @@ public sealed class IHeartRadioSource :
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, JsonSerializer.Serialize(_favorites.Values.ToList()));
         }
-        catch (Exception ex) { Log($"iHeart: favorites write failed: {ex.Message}"); }
+        catch (Exception ex) { Log(LogLevel.Warning, $"iHeart: favorites write failed: {ex.Message}"); }
     }
 
     // ── IPlayableResolver ───────────────────────────────────────────────────────
@@ -579,7 +579,7 @@ public sealed class IHeartRadioSource :
 
             if (string.IsNullOrWhiteSpace(mediaUrl))
             {
-                Log($"iHeart: no media URL for episode '{item.ItemId}'.");
+                Log(LogLevel.Warning, $"iHeart: no media URL for episode '{item.ItemId}'.");
                 return null;
             }
 
@@ -599,7 +599,7 @@ public sealed class IHeartRadioSource :
 
         if (string.IsNullOrWhiteSpace(streamUrl))
         {
-            Log($"iHeart: no stream URL for station '{item.ItemId}'.");
+            Log(LogLevel.Warning, $"iHeart: no stream URL for station '{item.ItemId}'.");
             return null;
         }
 
@@ -623,5 +623,5 @@ public sealed class IHeartRadioSource :
         // Nothing owned to release (the HttpClient belongs to the host).
     }
 
-    private void Log(string message) => _host?.Log(message);
+    private void Log(LogLevel level, string message) => _host?.Log(level, message);
 }

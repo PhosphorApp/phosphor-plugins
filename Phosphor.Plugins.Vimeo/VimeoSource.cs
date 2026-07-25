@@ -89,7 +89,7 @@ public sealed class VimeoSource :
     {
         if (string.IsNullOrWhiteSpace(_accessToken)) { _client = null; return; }
         var http = _host?.HttpClient ?? SharedHttpClient;
-        _client ??= new VimeoClient(http, _accessToken, _host is { } h ? h.Log : null);
+        _client ??= new VimeoClient(http, _accessToken, _host is { } h ? (s => h.Log(LogLevel.Debug, s)) : (Action<string>?)null);
     }
 
     private void EnsureResolver()
@@ -100,7 +100,7 @@ public sealed class VimeoSource :
             var local = Path.Combine(AppContext.BaseDirectory, "yt-dlp.exe");
             path = File.Exists(local) ? local : "yt-dlp";
         }
-        _resolver = new YtDlpResolver(path, _host is { } h ? h.Log : null);
+        _resolver = new YtDlpResolver(path, _host is { } h ? (s => h.Log(LogLevel.Debug, s)) : (Action<string>?)null);
     }
 
     public async Task<ConnectionTestResult> TestConnectionAsync(CancellationToken ct = default)
@@ -361,7 +361,7 @@ public sealed class VimeoSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"Vimeo: favorites read failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Vimeo: favorites read failed: {ex.Message}");
             return new Dictionary<string, VimeoFavorite>(StringComparer.Ordinal);
         }
     }
@@ -376,7 +376,7 @@ public sealed class VimeoSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"Vimeo: favorites write failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Vimeo: favorites write failed: {ex.Message}");
         }
     }
 

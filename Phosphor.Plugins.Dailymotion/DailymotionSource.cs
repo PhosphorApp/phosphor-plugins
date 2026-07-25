@@ -79,7 +79,7 @@ public sealed class DailymotionSource :
     private void EnsureClient()
     {
         var http = _host?.HttpClient ?? SharedHttpClient;
-        _client ??= new DailymotionClient(http, _host is { } h ? h.Log : null);
+        _client ??= new DailymotionClient(http, _host is { } h ? (s => h.Log(LogLevel.Debug, s)) : (Action<string>?)null);
     }
 
     private void EnsureResolver()
@@ -90,7 +90,7 @@ public sealed class DailymotionSource :
             var local = Path.Combine(AppContext.BaseDirectory, "yt-dlp.exe");
             path = File.Exists(local) ? local : "yt-dlp";
         }
-        _resolver = new YtDlpResolver(path, _host is { } h ? h.Log : null);
+        _resolver = new YtDlpResolver(path, _host is { } h ? (s => h.Log(LogLevel.Debug, s)) : (Action<string>?)null);
     }
 
     public async Task<ConnectionTestResult> TestConnectionAsync(CancellationToken ct = default)
@@ -326,7 +326,7 @@ public sealed class DailymotionSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"Dailymotion: favorites read failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Dailymotion: favorites read failed: {ex.Message}");
             return new Dictionary<string, DmFavorite>(StringComparer.Ordinal);
         }
     }
@@ -341,7 +341,7 @@ public sealed class DailymotionSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"Dailymotion: favorites write failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Dailymotion: favorites write failed: {ex.Message}");
         }
     }
 

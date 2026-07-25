@@ -81,7 +81,7 @@ public sealed class JellyfinSource :
         // InitializeAsync, so _host can be null. Fall back to a shared HttpClient + no-op log so the
         // client still works for those one-off calls; the real host client is used once initialized.
         var http = _host?.HttpClient ?? SharedHttpClient;
-        var log = _host is { } h ? h.Log : (Action<string>?)null;
+        Action<string>? log = _host is { } h ? (s => h.Log(LogLevel.Debug, s)) : null;
         _client ??= new JellyfinClient(http, StableDeviceId(), log);
         _client.Configure(_serverUrl, _username, _password, _stereoAudio);
     }
@@ -121,7 +121,7 @@ public sealed class JellyfinSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"JellyfinSource: GetViews failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"JellyfinSource: GetViews failed — {ex.Message}");
             yield break;
         }
 
@@ -162,7 +162,7 @@ public sealed class JellyfinSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"JellyfinSource: Browse '{parentId}' failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"JellyfinSource: Browse '{parentId}' failed — {ex.Message}");
             return new BrowseResult();
         }
 
@@ -195,7 +195,7 @@ public sealed class JellyfinSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"JellyfinSource: Search '{query}' failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"JellyfinSource: Search '{query}' failed — {ex.Message}");
             yield break;
         }
 
@@ -228,7 +228,7 @@ public sealed class JellyfinSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"JellyfinSource: resolve auth failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"JellyfinSource: resolve auth failed — {ex.Message}");
             return null;
         }
 
@@ -256,7 +256,7 @@ public sealed class JellyfinSource :
             }
             catch (Exception ex)
             {
-                _host?.Log($"JellyfinSource: GetChapters '{itemId}' failed — {ex.Message}");
+                _host?.Log(LogLevel.Warning, $"JellyfinSource: GetChapters '{itemId}' failed — {ex.Message}");
             }
         }
 
@@ -322,7 +322,7 @@ public sealed class JellyfinSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"JellyfinSource: config GetViews failed — {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"JellyfinSource: config GetViews failed — {ex.Message}");
             return new ConfigSelection([]);
         }
 
@@ -500,7 +500,7 @@ public sealed class JellyfinSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"Jellyfin: favorites read failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Jellyfin: favorites read failed: {ex.Message}");
             return new Dictionary<string, JfFavorite>(StringComparer.Ordinal);
         }
     }
@@ -515,7 +515,7 @@ public sealed class JellyfinSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"Jellyfin: favorites write failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Jellyfin: favorites write failed: {ex.Message}");
         }
     }
 }

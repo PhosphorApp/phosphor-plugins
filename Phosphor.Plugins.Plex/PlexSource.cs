@@ -45,6 +45,10 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
     public Task InitializeAsync(IPluginHost host, CancellationToken ct = default)
     {
         _host = host;
+        // Route PlexService diagnostics through the host contract (Path A) so they land in the host
+        // log file tagged [Plugin:{id}] and honor the verbosity setting. Category is folded into the
+        // message since IPluginHost.Log carries only a level + message.
+        _plex.Log = (level, category, message) => host.Log(level, $"{category}: {message}");
         return Task.CompletedTask;
     }
 
@@ -60,7 +64,7 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
         _libraries = ParseLibraries(Get(values, PlexSourceProvider.KeyLibraries));
 
         _plex.Configure(_serverUrl, _token, _stereoAudio);
-        _host?.Log($"PlexSource: server={_serverUrl} stereo={_stereoAudio} libraries={_libraries.Count}");
+        _host?.Log(LogLevel.Debug, $"PlexSource: server={_serverUrl} stereo={_stereoAudio} libraries={_libraries.Count}");
     }
 
     // ── IConnectionTestable ────────────────────────────────────────────────────
@@ -160,7 +164,7 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
             }
             catch (Exception ex)
             {
-                _host?.Log($"PlexSource: filtered search failed for '{lib.Title}': {ex.Message}");
+                _host?.Log(LogLevel.Warning, $"PlexSource: filtered search failed for '{lib.Title}': {ex.Message}");
                 continue;
             }
 
@@ -645,7 +649,7 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
         }
         catch (Exception ex)
         {
-            _host?.Log($"Plex: favorites read failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Plex: favorites read failed: {ex.Message}");
             return new Dictionary<string, PlexFavorite>(StringComparer.Ordinal);
         }
     }
@@ -660,7 +664,7 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
         }
         catch (Exception ex)
         {
-            _host?.Log($"Plex: favorites write failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"Plex: favorites write failed: {ex.Message}");
         }
     }
 }

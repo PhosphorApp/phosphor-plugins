@@ -102,7 +102,7 @@ public sealed class SoundCloudSource :
             var local = Path.Combine(AppContext.BaseDirectory, "yt-dlp.exe");
             path = File.Exists(local) ? local : "yt-dlp";
         }
-        _resolver = new YtDlpResolver(path, _host is { } h ? h.Log : null);
+        _resolver = new YtDlpResolver(path, _host is { } h ? (s => h.Log(LogLevel.Debug, s)) : (Action<string>?)null);
     }
 
     public async Task<ConnectionTestResult> TestConnectionAsync(CancellationToken ct = default)
@@ -339,7 +339,7 @@ public sealed class SoundCloudSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"SoundCloud: favorites read failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"SoundCloud: favorites read failed: {ex.Message}");
             return new Dictionary<string, ScFavorite>(StringComparer.Ordinal);
         }
     }
@@ -354,7 +354,7 @@ public sealed class SoundCloudSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"SoundCloud: favorites write failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"SoundCloud: favorites write failed: {ex.Message}");
         }
     }
 
@@ -421,7 +421,7 @@ public sealed class SoundCloudSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"SoundCloud: unplayable read failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"SoundCloud: unplayable read failed: {ex.Message}");
         }
     }
 
@@ -437,7 +437,7 @@ public sealed class SoundCloudSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"SoundCloud: unplayable write failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"SoundCloud: unplayable write failed: {ex.Message}");
         }
     }
 

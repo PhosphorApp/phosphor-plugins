@@ -1,5 +1,8 @@
 namespace Phosphor.Video;
 
+using Phosphor;
+using Phosphor.Plugin.Abstractions;
+
 /// <summary>
 /// Handles keeping the bundled <c>yt-dlp.exe</c> current between (infrequent) app
 /// releases, using yt-dlp's own self-updater. Runs through
@@ -13,10 +16,12 @@ namespace Phosphor.Video;
 public sealed class YtDlpUpdater
 {
     private readonly string _ytDlpPath;
+    private readonly PluginLog? _log;
 
-    public YtDlpUpdater(string? ytDlpPath = null)
+    public YtDlpUpdater(string? ytDlpPath = null, PluginLog? log = null)
     {
         _ytDlpPath = ytDlpPath ?? YtDlpVideoEngine.ResolveYtDlpPath();
+        _log = log;
     }
 
     /// <summary>Returns the current yt-dlp version string (e.g. "2026.07.04"), or null on failure.</summary>
@@ -25,14 +30,14 @@ public sealed class YtDlpUpdater
         try
         {
             var (code, stdout, _) = await YtDlpVideoEngine.RunYtDlpAsync(
-                _ytDlpPath, new[] { "--version" }, ct);
+                _ytDlpPath, new[] { "--version" }, ct, _log);
             if (code != 0) return null;
             var v = stdout.Trim();
             return string.IsNullOrEmpty(v) ? null : v;
         }
         catch (Exception ex)
         {
-            DebugLog.Log(LogLevel.Warning, "YtDlpUpdater", $"version check failed: {ex.Message}");
+            _log?.Invoke(LogLevel.Warning, "YtDlpUpdater", $"version check failed: {ex.Message}");
             return null;
         }
     }
@@ -50,17 +55,17 @@ public sealed class YtDlpUpdater
         try
         {
             (code, _, stderr) = await YtDlpVideoEngine.RunYtDlpAsync(
-                _ytDlpPath, new[] { "--update-to", "stable" }, ct);
+                _ytDlpPath, new[] { "--update-to", "stable" }, ct, _log);
         }
         catch (Exception ex)
         {
-            DebugLog.Log(LogLevel.Warning, "YtDlpUpdater", $"update failed: {ex.Message}");
+            _log?.Invoke(LogLevel.Warning, "YtDlpUpdater", $"update failed: {ex.Message}");
             return new YtDlpUpdateResult(YtDlpUpdateStatus.Failed, before, before, ex.Message);
         }
 
         if (code != 0)
         {
-            DebugLog.Log(LogLevel.Warning, "YtDlpUpdater", $"update exited {code}: {stderr.Trim()}");
+            _log?.Invoke(LogLevel.Warning, "YtDlpUpdater", $"update exited {code}: {stderr.Trim()}");
             return new YtDlpUpdateResult(YtDlpUpdateStatus.Failed, before, before, stderr.Trim());
         }
 
@@ -69,7 +74,7 @@ public sealed class YtDlpUpdater
             ? YtDlpUpdateStatus.Updated
             : YtDlpUpdateStatus.AlreadyCurrent;
 
-        DebugLog.Log(LogLevel.Info, "YtDlpUpdater", $"update {status}: {before} -> {after}");
+        _log?.Invoke(LogLevel.Info, "YtDlpUpdater", $"update {status}: {before} -> {after}");
         return new YtDlpUpdateResult(status, before, after, null);
     }
 }

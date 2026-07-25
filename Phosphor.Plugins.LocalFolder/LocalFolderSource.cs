@@ -95,7 +95,7 @@ public sealed class LocalFolderSource :
             _catalogBuilt = false;
             _catalogSavedUtc = null;
         }
-        _host?.Log($"LocalFolderSource: {_folders.Count} folder(s), recursive={_recursive}, cacheMaxAgeHours={_cacheMaxAgeHours}, organizeBy={_organizeBy}, thumbnails={_extractThumbnails}, video=[{string.Join(' ', _videoExtensions)}], audio=[{string.Join(' ', _audioExtensions)}]");
+        _host?.Log(LogLevel.Debug, $"LocalFolderSource: {_folders.Count} folder(s), recursive={_recursive}, cacheMaxAgeHours={_cacheMaxAgeHours}, organizeBy={_organizeBy}, thumbnails={_extractThumbnails}, video=[{string.Join(' ', _videoExtensions)}], audio=[{string.Join(' ', _audioExtensions)}]");
     }
 
     /// <summary>
@@ -176,7 +176,7 @@ public sealed class LocalFolderSource :
                 }
                 catch (Exception ex)
                 {
-                    _host?.Log($"LocalFolderSource: skipping '{folder}': {ex.Message}");
+                    _host?.Log(LogLevel.Warning, $"LocalFolderSource: skipping '{folder}': {ex.Message}");
                     folderIndex++;
                     continue;
                 }
@@ -199,7 +199,7 @@ public sealed class LocalFolderSource :
                     }
                     catch (Exception ex)
                     {
-                        _host?.Log($"LocalFolderSource: skipping '{path}': {ex.Message}");
+                        _host?.Log(LogLevel.Warning, $"LocalFolderSource: skipping '{path}': {ex.Message}");
                         continue;
                     }
 
@@ -271,7 +271,7 @@ public sealed class LocalFolderSource :
             if (!stale)
                 return cached;
 
-            _host?.Log("LocalFolderSource: catalog cache is stale — rescanning.");
+            _host?.Log(LogLevel.Debug, "LocalFolderSource: catalog cache is stale — rescanning.");
         }
 
         // No usable cache (or it's stale): build synchronously on first access.
@@ -326,7 +326,7 @@ public sealed class LocalFolderSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"LocalFolderSource: no tags for '{entry.Path}': {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"LocalFolderSource: no tags for '{entry.Path}': {ex.Message}");
             return entry with { MetadataRead = true };
         }
     }
@@ -391,7 +391,7 @@ public sealed class LocalFolderSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"LocalFolderSource: thumbnail failed for '{entry.Path}': {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"LocalFolderSource: thumbnail failed for '{entry.Path}': {ex.Message}");
             return entry;
         }
     }
@@ -408,7 +408,7 @@ public sealed class LocalFolderSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"LocalFolderSource: no cover art for '{entry.Path}': {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"LocalFolderSource: no cover art for '{entry.Path}': {ex.Message}");
             return false;
         }
     }
@@ -448,7 +448,7 @@ public sealed class LocalFolderSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"LocalFolderSource: ffmpeg failed for '{entry.Path}': {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"LocalFolderSource: ffmpeg failed for '{entry.Path}': {ex.Message}");
             return false;
         }
     }
@@ -483,7 +483,7 @@ public sealed class LocalFolderSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"LocalFolderSource: failed to write catalog cache: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"LocalFolderSource: failed to write catalog cache: {ex.Message}");
         }
     }
 
@@ -510,7 +510,7 @@ public sealed class LocalFolderSource :
         }
         catch (Exception ex)
         {
-            _host?.Log($"LocalFolderSource: failed to read catalog cache: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"LocalFolderSource: failed to read catalog cache: {ex.Message}");
             return false;
         }
     }

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Phosphor.Plugin.Abstractions;
 
 namespace Phosphor.Video;
 
@@ -17,10 +18,12 @@ namespace Phosphor.Video;
 public sealed class YtDlpVideoEngine : IVideoEngine
 {
     private readonly string _ytDlpPath;
+    private readonly PluginLog? _log;
 
-    public YtDlpVideoEngine(string? ytDlpPath = null)
+    public YtDlpVideoEngine(string? ytDlpPath = null, PluginLog? log = null)
     {
         _ytDlpPath = ytDlpPath ?? ResolveYtDlpPath();
+        _log = log;
     }
 
     /// <summary>Available only when the yt-dlp executable is present.</summary>
@@ -64,7 +67,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
             var audioUrl = FirstNonEmptyLine(aOut);
             if (aCode != 0 || audioUrl == null)
             {
-                DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"audio-only resolve failed ({aCode}): {Trim(aErr)}");
+                _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine", $"audio-only resolve failed ({aCode}): {Trim(aErr)}");
                 return null;
             }
             return new VideoStreams(VideoStreamKind.AudioOnly, audioUrl, null, "");
@@ -91,7 +94,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
         if (code != 0 || lines.Count < 2)
         {
-            DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"live resolve failed ({code}), lines={lines.Count}: {Trim(stderr)}");
+            _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine", $"live resolve failed ({code}), lines={lines.Count}: {Trim(stderr)}");
             return null;
         }
 
@@ -158,7 +161,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
         if (code != 0 || string.IsNullOrWhiteSpace(stdout))
         {
-            DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"metadata failed ({code}): {Trim(stderr)}");
+            _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine", $"metadata failed ({code}): {Trim(stderr)}");
             return null;
         }
 
@@ -183,7 +186,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
         }
         catch (Exception ex)
         {
-            DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"metadata parse failed: {ex.Message}");
+            _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine", $"metadata parse failed: {ex.Message}");
             return null;
         }
     }
@@ -208,14 +211,14 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
         if (exitCode != 0)
         {
-            DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"download failed ({exitCode}) fmt={format}: {Trim(stderr)}");
+            _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine", $"download failed ({exitCode}) fmt={format}: {Trim(stderr)}");
             return null;
         }
 
         var path = stdout.Trim();
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
         {
-            DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"download produced no file for fmt={format}");
+            _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine", $"download produced no file for fmt={format}");
             return null;
         }
 
@@ -239,7 +242,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
     private async Task<(int exitCode, string stdout, string stderr)> RunAsync(
         IReadOnlyList<string> args, CancellationToken ct)
-        => await RunYtDlpAsync(_ytDlpPath, args, ct);
+        => await RunYtDlpAsync(_ytDlpPath, args, ct, _log);
 
     /// <summary>
     /// Serializes all <c>yt-dlp.exe</c> invocations (resolve / download / metadata /
@@ -251,7 +254,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
     /// <summary>Runs <c>yt-dlp.exe</c> with the given args under <see cref="ProcessGate"/>.</summary>
     internal static async Task<(int exitCode, string stdout, string stderr)> RunYtDlpAsync(
-        string ytDlpPath, IReadOnlyList<string> args, CancellationToken ct)
+        string ytDlpPath, IReadOnlyList<string> args, CancellationToken ct, PluginLog? log = null)
     {
         await ProcessGate.WaitAsync(ct);
         try
@@ -266,7 +269,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
             };
             foreach (var a in args) psi.ArgumentList.Add(a);
 
-            DebugLog.Log(LogLevel.Trace, "yt-dlp", FormatCommand(ytDlpPath, args));
+            log?.Invoke(LogLevel.Trace, "yt-dlp", FormatCommand(ytDlpPath, args));
 
             using var proc = new Process { StartInfo = psi };
             proc.Start();
@@ -293,7 +296,8 @@ public sealed class YtDlpVideoEngine : IVideoEngine
     /// </summary>
     internal static async IAsyncEnumerable<string> RunYtDlpStreamingAsync(
         string ytDlpPath, IReadOnlyList<string> args,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default,
+        PluginLog? log = null)
     {
         var psi = new ProcessStartInfo
         {
@@ -307,7 +311,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
         using var proc = new Process { StartInfo = psi };
 
-        DebugLog.Log(LogLevel.Trace, "yt-dlp", FormatCommand(ytDlpPath, args));
+        log?.Invoke(LogLevel.Trace, "yt-dlp", FormatCommand(ytDlpPath, args));
 
         await ProcessGate.WaitAsync(ct);
         try

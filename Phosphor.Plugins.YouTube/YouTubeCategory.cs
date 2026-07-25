@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Phosphor.Plugin.Abstractions;
 
 namespace Phosphor.Plugins.YouTube;
 
@@ -77,7 +78,7 @@ public static class YouTubeCategoryStore
     /// returned category is guaranteed a non-empty <see cref="YouTubeCategory.Id"/>. Used to seed a
     /// fresh instance and to power a future "restore defaults" action.
     /// </summary>
-    public static List<YouTubeCategory> LoadDefaults(Action<string>? log = null)
+    public static List<YouTubeCategory> LoadDefaults(Action<LogLevel, string>? log = null)
     {
         var fromFile = TryLoadDefaultsFile(log);
         var list = fromFile ?? Seed.Select(Clone).ToList();
@@ -88,7 +89,7 @@ public static class YouTubeCategoryStore
     }
 
     /// <summary>Deserializes the user's category list from its persisted JSON blob.</summary>
-    public static List<YouTubeCategory> Deserialize(string? json, Action<string>? log = null)
+    public static List<YouTubeCategory> Deserialize(string? json, Action<LogLevel, string>? log = null)
     {
         if (string.IsNullOrWhiteSpace(json)) return [];
         try
@@ -102,7 +103,7 @@ public static class YouTubeCategoryStore
         }
         catch (Exception ex)
         {
-            log?.Invoke($"YouTube: category list parse failed: {ex.Message}");
+            log?.Invoke(LogLevel.Warning, $"YouTube: category list parse failed: {ex.Message}");
             return [];
         }
     }
@@ -111,7 +112,7 @@ public static class YouTubeCategoryStore
     public static string Serialize(IEnumerable<YouTubeCategory> categories) =>
         JsonSerializer.Serialize(categories, JsonOptions);
 
-    private static List<YouTubeCategory>? TryLoadDefaultsFile(Action<string>? log)
+    private static List<YouTubeCategory>? TryLoadDefaultsFile(Action<LogLevel, string>? log)
     {
         try
         {
@@ -122,13 +123,13 @@ public static class YouTubeCategoryStore
             var parsed = JsonSerializer.Deserialize<List<YouTubeCategory>>(File.ReadAllText(path), JsonOptions);
             if (parsed is { Count: > 0 })
             {
-                log?.Invoke($"YouTube: loaded default categories from {path}");
+                log?.Invoke(LogLevel.Debug, $"YouTube: loaded default categories from {path}");
                 return parsed;
             }
         }
         catch (Exception ex)
         {
-            log?.Invoke($"YouTube: default categories read failed: {ex.Message}");
+            log?.Invoke(LogLevel.Warning, $"YouTube: default categories read failed: {ex.Message}");
         }
         return null;
     }

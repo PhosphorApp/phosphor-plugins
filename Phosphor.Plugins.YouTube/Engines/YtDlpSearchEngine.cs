@@ -19,10 +19,12 @@ namespace Phosphor.Search;
 public sealed class YtDlpSearchEngine : ISearchEngine
 {
     private readonly string _ytDlpPath;
+    private readonly PluginLog? _log;
 
-    public YtDlpSearchEngine(string? ytDlpPath = null)
+    public YtDlpSearchEngine(string? ytDlpPath = null, PluginLog? log = null)
     {
         _ytDlpPath = ytDlpPath ?? YtDlpVideoEngine.ResolveYtDlpPath();
+        _log = log;
     }
 
     /// <summary>Available only when the yt-dlp executable is present.</summary>
@@ -58,7 +60,7 @@ public sealed class YtDlpSearchEngine : ISearchEngine
             _ytDlpPath,
             new[] { "--no-warnings", "--flat-playlist", "--dump-json", "--playlist-items", "1",
                     searchUrl },
-            ct);
+            ct, _log);
 
         if (code != 0) return null;
         var line = FirstNonEmptyLine(stdout);
@@ -93,7 +95,7 @@ public sealed class YtDlpSearchEngine : ISearchEngine
     {
         var args = new[] { "--no-warnings", "--flat-playlist", "--lazy-playlist", "--dump-json", target };
 
-        await foreach (var line in YtDlpVideoEngine.RunYtDlpStreamingAsync(_ytDlpPath, args, ct))
+        await foreach (var line in YtDlpVideoEngine.RunYtDlpStreamingAsync(_ytDlpPath, args, ct, _log))
         {
             VideoItem? item = null;
             try

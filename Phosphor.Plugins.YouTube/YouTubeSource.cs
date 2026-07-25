@@ -38,14 +38,24 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     private ISearchEngine _search;
     private IVideoEngine _video;
 
+    /// <summary>
+    /// Diagnostics sink threaded into the engines/factories. Reads <see cref="_host"/> at call time so
+    /// it is a safe no-op during the constructor (before <see cref="InitializeAsync"/> supplies the
+    /// host) and routes through <see cref="IPluginHost.Log(LogLevel, string)"/> (Path A) once wired —
+    /// so YouTube engine logs land in the host log file and honor the verbosity setting. Category is
+    /// folded into the message since the contract carries only a level + message.
+    /// </summary>
+    private void EngineLog(LogLevel level, string category, string message) =>
+        _host?.Log(level, $"{category}: {message}");
+
     public YouTubeSource(string instanceId, IReadOnlyDictionary<string, string?> settings)
     {
         InstanceId = instanceId;
         // Engines are built here with no host HttpClient yet; InitializeAsync adopts the host's
         // shared client and rebuilds the search engine so the configured network timeout applies.
         ApplySettingsInternal(settings);
-        _search ??= SearchEngineFactory.Create(_searchKind, _http);
-        _video ??= VideoEngineFactory.Create(_videoKind);
+        _search ??= SearchEngineFactory.Create(_searchKind, _http, EngineLog);
+        _video ??= VideoEngineFactory.Create(_videoKind, EngineLog);
     }
 
     public string InstanceId { get; }
@@ -67,7 +77,7 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
         // timeout apply to YouTube discovery. The search engine is the http consumer — rebuild it
         // with the host client (the video engine's yt-dlp/YoutubeExplode paths don't take it).
         _http = host.HttpClient;
-        _search = SearchEngineFactory.Create(_searchKind, _http);
+        _search = SearchEngineFactory.Create(_searchKind, _http, EngineLog);
         return Task.CompletedTask;
     }
 
@@ -110,9 +120,9 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
 
         // Re-create engines through the existing factories (which keep the availability
         // fallback), so a settings change takes effect immediately.
-        _search = SearchEngineFactory.Create(_searchKind, _http);
-        _video = VideoEngineFactory.Create(_videoKind);
-        _host?.Log($"YouTubeSource: search={_searchKind} video={_videoKind} quality={_quality} stereo={_preferStereo}");
+        _search = SearchEngineFactory.Create(_searchKind, _http, EngineLog);
+        _video = VideoEngineFactory.Create(_videoKind, EngineLog);
+        _host?.Log(LogLevel.Debug, $"YouTubeSource: search={_searchKind} video={_videoKind} quality={_quality} stereo={_preferStereo}");
     }
 
     // ── Categories (plug-in-owned tiles) ───────────────────────────────────────
@@ -121,9 +131,9 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     /// default-categories.json when the blob is empty/absent (first run).</summary>
     private void LoadCategories(string? json)
     {
-        var list = YouTubeCategoryStore.Deserialize(json, s => _host?.Log(s));
+        var list = YouTubeCategoryStore.Deserialize(json, (lvl, s) => _host?.Log(lvl, s));
         if (list.Count == 0)
-            list = YouTubeCategoryStore.LoadDefaults(s => _host?.Log(s));
+            list = YouTubeCategoryStore.LoadDefaults((lvl, s) => _host?.Log(lvl, s));
         lock (_categoriesGate)
             _categories = list;
     }
@@ -186,7 +196,7 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
 
     /// <summary>The plug-in's built-in default categories, for a "restore defaults" affordance.</summary>
     public IReadOnlyList<SavedSearchCategory> GetDefaultSavedSearchCategories() =>
-        YouTubeCategoryStore.LoadDefaults(s => _host?.Log(s))
+        YouTubeCategoryStore.LoadDefaults((lvl, s) => _host?.Log(lvl, s))
             .OrderBy(c => c.SortOrder)
             .Select(c => new SavedSearchCategory(c.Id, c.Name, c.Icon, c.SearchTerm))
             .ToList();
@@ -285,7 +295,7 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     public async Task<string?> GetVersionAsync(CancellationToken ct = default)
     {
         if (!SupportsUpdate) return null;
-        return await new YtDlpUpdater().GetVersionAsync(ct);
+        return await new YtDlpUpdater(log: EngineLog).GetVersionAsync(ct);
     }
 
     public async Task<UpdateResult> UpdateAsync(CancellationToken ct = default)
@@ -293,7 +303,7 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
         if (!SupportsUpdate)
             return new UpdateResult(UpdateStatus.NotSupported, null, null, null);
 
-        var r = await new YtDlpUpdater().UpdateAsync(ct);
+        var r = await new YtDlpUpdater(log: EngineLog).UpdateAsync(ct);
         var status = r.Status switch
         {
             YtDlpUpdateStatus.Updated => UpdateStatus.Updated,
@@ -383,7 +393,7 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
         }
         catch (Exception ex)
         {
-            _host?.Log($"YouTube: favorites read failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"YouTube: favorites read failed: {ex.Message}");
             return new Dictionary<string, YtFavorite>(StringComparer.Ordinal);
         }
     }
@@ -398,7 +408,7 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
         }
         catch (Exception ex)
         {
-            _host?.Log($"YouTube: favorites write failed: {ex.Message}");
+            _host?.Log(LogLevel.Warning, $"YouTube: favorites write failed: {ex.Message}");
         }
     }
 }
