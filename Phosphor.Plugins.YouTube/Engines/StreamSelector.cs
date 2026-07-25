@@ -18,14 +18,14 @@ internal static class StreamSelector
 
     private static void LogVideoStream(string label, IVideoStreamInfo stream)
     {
-        DebugLog.Log("StreamSelector",
+        DebugLog.Log(LogLevel.Trace, "StreamSelector",
             $"{label}: {stream.VideoQuality.Label} {stream.VideoResolution.Width}x{stream.VideoResolution.Height} " +
             $"codec={stream.VideoCodec} bitrate={stream.Bitrate} size={stream.Size} container={stream.Container}");
     }
 
     private static void LogAudioStream(string label, IAudioStreamInfo stream)
     {
-        DebugLog.Log("StreamSelector",
+        DebugLog.Log(LogLevel.Trace, "StreamSelector",
             $"{label}: codec={stream.AudioCodec} bitrate={stream.Bitrate} size={stream.Size} container={stream.Container}");
     }
 
@@ -115,7 +115,7 @@ internal static class StreamSelector
 
         if (result != null)
         {
-            DebugLog.Log("StreamSelector",
+            DebugLog.Log(LogLevel.Trace, "StreamSelector",
                 $"Selected muxed (pref={pref}, cap={cap}p): {result.VideoQuality.Label} {result.VideoResolution.Width}x{result.VideoResolution.Height} " +
                 $"videoCodec={result.VideoCodec} audioCodec={result.AudioCodec} bitrate={result.Bitrate} size={result.Size} container={result.Container}");
         }

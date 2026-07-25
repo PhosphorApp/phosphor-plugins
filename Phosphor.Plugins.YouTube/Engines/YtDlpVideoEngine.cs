@@ -64,7 +64,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
             var audioUrl = FirstNonEmptyLine(aOut);
             if (aCode != 0 || audioUrl == null)
             {
-                DebugLog.Log("YtDlpVideoEngine", $"audio-only resolve failed ({aCode}): {Trim(aErr)}");
+                DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"audio-only resolve failed ({aCode}): {Trim(aErr)}");
                 return null;
             }
             return new VideoStreams(VideoStreamKind.AudioOnly, audioUrl, null, "");
@@ -91,7 +91,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
         if (code != 0 || lines.Count < 2)
         {
-            DebugLog.Log("YtDlpVideoEngine", $"live resolve failed ({code}), lines={lines.Count}: {Trim(stderr)}");
+            DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"live resolve failed ({code}), lines={lines.Count}: {Trim(stderr)}");
             return null;
         }
 
@@ -158,7 +158,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
         if (code != 0 || string.IsNullOrWhiteSpace(stdout))
         {
-            DebugLog.Log("YtDlpVideoEngine", $"metadata failed ({code}): {Trim(stderr)}");
+            DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"metadata failed ({code}): {Trim(stderr)}");
             return null;
         }
 
@@ -183,7 +183,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
         }
         catch (Exception ex)
         {
-            DebugLog.Log("YtDlpVideoEngine", $"metadata parse failed: {ex.Message}");
+            DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"metadata parse failed: {ex.Message}");
             return null;
         }
     }
@@ -208,14 +208,14 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
         if (exitCode != 0)
         {
-            DebugLog.Log("YtDlpVideoEngine", $"download failed ({exitCode}) fmt={format}: {Trim(stderr)}");
+            DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"download failed ({exitCode}) fmt={format}: {Trim(stderr)}");
             return null;
         }
 
         var path = stdout.Trim();
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
         {
-            DebugLog.Log("YtDlpVideoEngine", $"download produced no file for fmt={format}");
+            DebugLog.Log(LogLevel.Warning, "YtDlpVideoEngine", $"download produced no file for fmt={format}");
             return null;
         }
 
@@ -266,7 +266,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
             };
             foreach (var a in args) psi.ArgumentList.Add(a);
 
-            DebugLog.Log("yt-dlp", FormatCommand(ytDlpPath, args));
+            DebugLog.Log(LogLevel.Trace, "yt-dlp", FormatCommand(ytDlpPath, args));
 
             using var proc = new Process { StartInfo = psi };
             proc.Start();
@@ -307,7 +307,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
         using var proc = new Process { StartInfo = psi };
 
-        DebugLog.Log("yt-dlp", FormatCommand(ytDlpPath, args));
+        DebugLog.Log(LogLevel.Trace, "yt-dlp", FormatCommand(ytDlpPath, args));
 
         await ProcessGate.WaitAsync(ct);
         try

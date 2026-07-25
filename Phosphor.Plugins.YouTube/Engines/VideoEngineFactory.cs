@@ -18,7 +18,7 @@ public static class VideoEngineFactory
         // back to the always-available in-process engine so playback never hard-fails.
         if (!engine.IsAvailable)
         {
-            DebugLog.Log("VideoEngine", $"{kind} unavailable — falling back to YoutubeExplode");
+            DebugLog.Log(LogLevel.Warning, "VideoEngine", $"{kind} unavailable — falling back to YoutubeExplode");
             return new YoutubeExplodeVideoEngine();
         }
 

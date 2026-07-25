@@ -20,7 +20,7 @@ public static class SearchEngineFactory
         // back to the always-available in-process engine so search never hard-fails.
         if (!engine.IsAvailable)
         {
-            DebugLog.Log("SearchEngine", $"{kind} unavailable — falling back to YoutubeExplode");
+            DebugLog.Log(LogLevel.Warning, "SearchEngine", $"{kind} unavailable — falling back to YoutubeExplode");
             return new YoutubeExplodeSearchEngine(http);
         }
 

@@ -32,7 +32,7 @@ public sealed class YtDlpUpdater
         }
         catch (Exception ex)
         {
-            DebugLog.Log("YtDlpUpdater", $"version check failed: {ex.Message}");
+            DebugLog.Log(LogLevel.Warning, "YtDlpUpdater", $"version check failed: {ex.Message}");
             return null;
         }
     }
@@ -54,13 +54,13 @@ public sealed class YtDlpUpdater
         }
         catch (Exception ex)
         {
-            DebugLog.Log("YtDlpUpdater", $"update failed: {ex.Message}");
+            DebugLog.Log(LogLevel.Warning, "YtDlpUpdater", $"update failed: {ex.Message}");
             return new YtDlpUpdateResult(YtDlpUpdateStatus.Failed, before, before, ex.Message);
         }
 
         if (code != 0)
         {
-            DebugLog.Log("YtDlpUpdater", $"update exited {code}: {stderr.Trim()}");
+            DebugLog.Log(LogLevel.Warning, "YtDlpUpdater", $"update exited {code}: {stderr.Trim()}");
             return new YtDlpUpdateResult(YtDlpUpdateStatus.Failed, before, before, stderr.Trim());
         }
 
@@ -69,7 +69,7 @@ public sealed class YtDlpUpdater
             ? YtDlpUpdateStatus.Updated
             : YtDlpUpdateStatus.AlreadyCurrent;
 
-        DebugLog.Log("YtDlpUpdater", $"update {status}: {before} -> {after}");
+        DebugLog.Log(LogLevel.Info, "YtDlpUpdater", $"update {status}: {before} -> {after}");
         return new YtDlpUpdateResult(status, before, after, null);
     }
 }
