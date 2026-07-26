@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.SiriusXM;
 /// suppresses seek/duration and never auto-advances.
 /// </remarks>
 public sealed class SiriusXmSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable, IDisposable
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable, IRefreshable, IDisposable
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
@@ -504,6 +504,43 @@ public sealed class SiriusXmSource :
     public Task<SourceMetadata?> GetMetadataAsync(SourceItem item, CancellationToken ct = default)
         // Live radio has no fixed duration/chapters — nothing to enrich.
         => Task.FromResult<SourceMetadata?>(null);
+
+    // ── IRefreshable (fetch/rebuild the channel lineup on demand) ───────────────
+
+    // Refreshable whenever credentials are present. This backs two host flows: an explicit
+    // "Rescan library" force-refresh, and the "Manage hidden channels…" first-run convenience —
+    // if the user opens the hide manager before ever browsing (so no lineup is cached yet), the
+    // host calls RefreshAsync to fetch it instead of asking them to go browse first.
+    public bool CanRefresh => IsConfigured;
+
+    public async Task<RefreshResult> RefreshAsync(
+        IProgress<RefreshProgress>? progress = null, CancellationToken ct = default)
+    {
+        progress?.Report(new RefreshProgress(-1, "Fetching SiriusXM channel lineup…"));
+        try
+        {
+            var client = await EnsureClientAsync(ct);
+            if (client == null)
+                return new RefreshResult(false, 0, "Sign-in failed — check your username, password, and region.");
+
+            var channels = await client.GetChannelsAsync(ct);
+            if (channels.Count == 0)
+                return new RefreshResult(false, 0, "No channels returned by SiriusXM.");
+
+            lock (_gate) _channels = channels;
+            SaveLineupCache(channels);
+            progress?.Report(new RefreshProgress(1, "Done"));
+            return new RefreshResult(true, channels.Count, $"Loaded {channels.Count:N0} SiriusXM channels.");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new RefreshResult(false, 0, $"Failed to fetch lineup: {ex.Message}");
+        }
+    }
 
     // ── Internals ───────────────────────────────────────────────────────────────
 
