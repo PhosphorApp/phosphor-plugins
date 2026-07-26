@@ -9,7 +9,7 @@ namespace Phosphor.Plugins.YouTube;
 /// (e.g. <c>playlist:modern rock</c>). YouTube was the original baked-in provider, so these were
 /// historically host-owned genre entries; they now belong to the plug-in. The list is fully
 /// user-generated (add/edit/delete), seeded on first run from the bundled
-/// <c>default-categories.json</c> template next to the plug-in DLL.
+/// <c>default_categories.json</c> template next to the plug-in DLL.
 /// </summary>
 public sealed class YouTubeCategory
 {
@@ -31,14 +31,14 @@ public sealed class YouTubeCategory
 
 /// <summary>
 /// Loads and persists the user's YouTube category list. The authoritative <em>initial</em> state is
-/// defined by the plug-in (the bundled <c>default-categories.json</c> template shipped next to the
+/// defined by the plug-in (the bundled <c>default_categories.json</c> template shipped next to the
 /// DLL); the live/customized state is owned by whoever holds the persisted settings blob (the host,
 /// via the YouTube instance settings). This keeps the boundary honest: the plug-in defines what the
 /// default YouTube categories are; the host arranges/overrides them.
 /// </summary>
 public static class YouTubeCategoryStore
 {
-    private const string DefaultsFileName = "default-categories.json";
+    private const string DefaultsFileName = "default_categories.json";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -46,7 +46,7 @@ public static class YouTubeCategoryStore
     };
 
     /// <summary>
-    /// Built-in fallback seed, used only if the bundled <c>default-categories.json</c> cannot be
+    /// Built-in fallback seed, used only if the bundled <c>default_categories.json</c> cannot be
     /// found or read. Mirrors the template file so the plug-in still ships sensible defaults even
     /// from a stripped deployment.
     /// </summary>
@@ -73,7 +73,7 @@ public static class YouTubeCategoryStore
     ];
 
     /// <summary>
-    /// Returns the plug-in's default category list: the bundled <c>default-categories.json</c> next
+    /// Returns the plug-in's default category list: the bundled <c>default_categories.json</c> next
     /// to the plug-in DLL if present and valid, otherwise the built-in <see cref="Seed"/>. Every
     /// returned category is guaranteed a non-empty <see cref="YouTubeCategory.Id"/>. Used to seed a
     /// fresh instance and to power a future "restore defaults" action.

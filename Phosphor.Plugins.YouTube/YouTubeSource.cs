@@ -31,7 +31,7 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     private bool _preferStereo = true;
 
     // User-defined category tiles (Rock/Pop/…). Plug-in-owned: seeded from the bundled
-    // default-categories.json on first run, then persisted in the instance settings blob.
+    // default_categories.json on first run, then persisted in the instance settings blob.
     private readonly object _categoriesGate = new();
     private List<YouTubeCategory> _categories = [];
 
@@ -128,7 +128,7 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     // ── Categories (plug-in-owned tiles) ───────────────────────────────────────
 
     /// <summary>Loads the category list from the persisted JSON blob, seeding from the bundled
-    /// default-categories.json when the blob is empty/absent (first run).</summary>
+    /// default_categories.json when the blob is empty/absent (first run).</summary>
     private void LoadCategories(string? json)
     {
         var list = YouTubeCategoryStore.Deserialize(json, (lvl, s) => _host?.Log(lvl, s));

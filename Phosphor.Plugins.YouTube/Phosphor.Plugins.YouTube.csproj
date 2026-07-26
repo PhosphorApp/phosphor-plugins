@@ -41,7 +41,7 @@
   <ItemGroup>
 	<!-- Plug-in-owned template defining the authoritative initial YouTube category list. Copied to
 		 the plug-in output and self-deployed to the host so it sits next to the DLL at runtime. -->
-	<Content Include="default-categories.json">
+	<Content Include="default_categories.json">
 	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 	</Content>
   </ItemGroup>
@@ -60,7 +60,7 @@
 	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
 	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
 	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
-	  <SelfDeployFiles Include="$(TargetDir)default-categories.json" Condition="Exists('$(TargetDir)default-categories.json')" />
+	  <SelfDeployFiles Include="$(TargetDir)default_categories.json" Condition="Exists('$(TargetDir)default_categories.json')" />
 	</ItemGroup>
 	<MakeDir Directories="$(HostPluginDest)" />
 	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
