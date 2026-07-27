@@ -16,15 +16,21 @@ namespace Phosphor.Plugins.Plex;
 /// In-box, so it uses <see cref="PlexService"/>, <see cref="VideoItem"/>, and the Plex enums
 /// directly. Pure data producer: no UI, no thread assumptions.
 /// </remarks>
-public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterableSearch, IBrowsable, IPagedBrowsable, IScopedSearchable, IPlayableResolver, IConfigurable, IGaplessCapable, IConnectionTestable, IFavoritable, IFavoriteCapture, ISearchHintProvider
+public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterableSearch, IBrowsable, IPagedBrowsable, IScopedSearchable, IPlayableResolver, IConfigurable, IGaplessCapable, IConnectionTestable, IFavoritable, IFavoriteCapture, ISearchHintProvider, IPlaybackReportable, IPlaybackSuccessReportable, IPlaybackStoppable
 {
     private readonly PlexService _plex = new();
+    private readonly PlexLiveTvService _liveTv = new();
     private IPluginHost? _host;
 
     private string _serverUrl = "";
     private string _token = "";
     private bool _stereoAudio;
     private List<PlexLibraryMapping> _libraries = [];
+
+    // Channels the host reported as failed to play (all tuners busy, brief outage). Not hidden — the
+    // channel stays visible and playable, badged ⊘, self-healing on a successful play.
+    private readonly object _deadGate = new();
+    private readonly HashSet<string> _dead = new(StringComparer.Ordinal);
 
     public PlexSource(string instanceId, IReadOnlyDictionary<string, string?> settings)
     {
@@ -49,6 +55,9 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
         // log file tagged [Plugin:{id}] and honor the verbosity setting. Category is folded into the
         // message since IPluginHost.Log carries only a level + message.
         _plex.Log = (level, category, message) => host.Log(level, $"{category}: {message}");
+        _liveTv.Log = (level, category, message) => host.Log(level, $"{category}: {message}");
+        // Defensive: stop any stray live transcode sessions a prior crash may have left holding a tuner.
+        _ = Task.Run(() => _liveTv.PanicCleanupAsync());
         return Task.CompletedTask;
     }
 
@@ -64,6 +73,10 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
         _libraries = ParseLibraries(Get(values, PlexSourceProvider.KeyLibraries));
 
         _plex.Configure(_serverUrl, _token, _stereoAudio);
+        _liveTv.Configure(_serverUrl, _token);
+        // Server/token may have changed — drop the cached EPG identifier so it re-resolves.
+        _epgCache = null;
+        _epgForDvr = "";
         _host?.Log(LogLevel.Debug, $"PlexSource: server={_serverUrl} stereo={_stereoAudio} libraries={_libraries.Count}");
     }
 
@@ -183,7 +196,13 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
     {
         await Task.CompletedTask;
         foreach (var lib in _libraries)
-            yield return PlexMappings.ToRootCategory(lib, InstanceId, DisplayName);
+        {
+            if (PlexSourceProvider.IsLiveTvType(lib.Type))
+                yield return PlexMappings.LiveTvRootCategory(
+                    new PlexDvr { Key = lib.Key, Title = lib.Title }, InstanceId, DisplayName);
+            else
+                yield return PlexMappings.ToRootCategory(lib, InstanceId, DisplayName);
+        }
     }
 
     public async Task<BrowseResult> BrowseAsync(SourceCategory category, CancellationToken ct = default)
@@ -195,6 +214,7 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
         return node.Kind switch
         {
             PlexNodeKind.Library => await BrowseLibraryAsync(node, ct),
+            PlexNodeKind.LiveTv => await BrowseLiveTvAsync(node, ct),
             PlexNodeKind.Artist => await BrowseChildrenAsync(node, PlexItemType.Album, PlexNodeKind.Album, ct),
             PlexNodeKind.Album => await BrowseTracksAsync(node, ct),
             PlexNodeKind.HubList => await BrowseHubListAsync(node, ct),
@@ -203,6 +223,31 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
             PlexNodeKind.Playlist => await BrowsePlaylistAsync(node, ct),
             _ => new BrowseResult(),
         };
+    }
+
+    /// <summary>Lists a DVR's live channels (enriched with "what's on now"), each a playable leaf,
+    /// minus any the user reported unavailable? No — unavailable channels stay visible with a ⊘ badge.</summary>
+    private async Task<BrowseResult> BrowseLiveTvAsync(PlexNode node, CancellationToken ct)
+    {
+        var channels = await _liveTv.GetChannelsAsync(new PlexDvr { Key = node.Key, EpgIdentifier = await ResolveEpgAsync(node.Key, ct) }, ct);
+        var items = channels
+            .Select(c => PlexMappings.LiveChannelToSourceItem(c, node.Key, InstanceId, IsDead($"livetv:{node.Key}:{c.Id}")))
+            .ToList();
+        return new BrowseResult { Items = items };
+    }
+
+    // The EPG identifier isn't stored in the library mapping (only the DVR key), so resolve it lazily
+    // from the server and cache per instance. Cheap: one /livetv/dvrs call, reused across browses.
+    private string? _epgCache;
+    private string _epgForDvr = "";
+    private async Task<string> ResolveEpgAsync(string dvrKey, CancellationToken ct)
+    {
+        if (_epgCache is not null && _epgForDvr == dvrKey) return _epgCache;
+        var dvrs = await _liveTv.GetDvrsAsync(ct);
+        var match = dvrs.FirstOrDefault(d => d.Key == dvrKey) ?? dvrs.FirstOrDefault();
+        _epgCache = match?.EpgIdentifier ?? "";
+        _epgForDvr = dvrKey;
+        return _epgCache;
     }
 
     /// <summary>
@@ -225,6 +270,9 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
             var type = _libraries.FirstOrDefault(l => l.Key == key)?.Type ?? "artist";
             return new PlexNode(PlexNodeKind.Library, key, type);
         }
+
+        if (id is { Length: > 0 } && id.StartsWith("livetv:", StringComparison.Ordinal))
+            return new PlexNode(PlexNodeKind.LiveTv, id["livetv:".Length..], PlexSourceProvider.LiveTvType);
 
         return null;
     }
@@ -384,11 +432,26 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
 
     // ── IPlayableResolver ──────────────────────────────────────────────────────
 
-    public Task<ResolvedStream?> ResolveAsync(SourceItem item, PlaybackPreferences prefs, CancellationToken ct = default)
+    public async Task<ResolvedStream?> ResolveAsync(SourceItem item, PlaybackPreferences prefs, CancellationToken ct = default)
     {
+        // Live TV: open a tuner session (tune → universal HLS manifest). One tuner per playing channel;
+        // opening a new session stops the prior one. Throws on failure (e.g. all tuners busy) so the
+        // host can report it back and we badge the channel unavailable.
+        if (item.SourceState is PlexLiveRef live)
+        {
+            var epg = await ResolveEpgAsync(live.DvrKey, ct);
+            var session = await _liveTv.OpenSessionAsync(
+                new PlexDvr { Key = live.DvrKey, EpgIdentifier = epg }, live.ChannelId, ct);
+            return new ResolvedStream(StreamTransport.Http, StreamLayout.Muxed, session.ManifestUrl)
+            {
+                IsLiveStream = true,
+                HttpHeaders = PlexLiveTvService.ManifestHeaders(session),
+            };
+        }
+
         // Plex items already carry a ready-to-play StreamUrl (built at browse time).
         var v = PlexMappings.VideoItemOf(item);
-        return Task.FromResult(v == null ? null : PlexMappings.ToResolvedStream(v));
+        return v == null ? null : PlexMappings.ToResolvedStream(v);
     }
 
     public async Task<SourceMetadata?> GetMetadataAsync(SourceItem item, CancellationToken ct = default)
@@ -426,7 +489,7 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
     public IReadOnlyList<ConfigAction> GetConfigActions() =>
     [
         new(PlexSourceProvider.ActionBrowseLibraries, "Browse libraries…",
-            "List the server's libraries and choose which become tiles."),
+            "List the server's libraries (and Live TV) and choose which become tiles."),
     ];
 
     public async Task<ConfigSelection> InvokeConfigActionAsync(string actionId, CancellationToken ct = default)
@@ -451,6 +514,18 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
             })
             .ToList();
 
+        // Append a synthetic option per Live TV DVR so it appears as a selectable tile alongside the
+        // real libraries. No sub-options (Live TV has no hubs/playlists). The host derives the
+        // persisted Title/Type by parsing the label as "Title (Type)", so the label MUST end with
+        // "(livetv)" to match PlexSourceProvider.LiveTvType — and we generalize the title to "Live TV"
+        // (a DVR's own name is just the tuner lineup, and multiple tuners can feed one Live TV).
+        foreach (var dvr in await _liveTv.GetDvrsAsync(ct))
+        {
+            enabled.TryGetValue(dvr.Key, out var prev);
+            options.Add(new ConfigOption(dvr.Key, $"Live TV ({PlexSourceProvider.LiveTvType})", prev != null,
+                Array.Empty<ConfigSubOption>()));
+        }
+
         return new ConfigSelection(options, AllowMultiple: true, Title: "Plex libraries");
     }
 
@@ -467,18 +542,32 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
         // Turn selected libraries + their sub-flags into the rich mapping, taking Title/Type from
         // the server and Hubs/Playlists from the user's per-library sub-option choices.
         var libs = (await _plex.GetLibrariesAsync()).ToDictionary(l => l.Key, l => l);
+        var dvrs = (await _liveTv.GetDvrsAsync(ct)).ToDictionary(d => d.Key, d => d);
         var mapped = new List<PlexLibraryMapping>();
         foreach (var r in results)
         {
-            if (!r.IsSelected || !libs.TryGetValue(r.OptionId, out var lib)) continue;
-            mapped.Add(new PlexLibraryMapping
+            if (!r.IsSelected) continue;
+            if (libs.TryGetValue(r.OptionId, out var lib))
             {
-                Key = lib.Key,
-                Title = lib.Title,
-                Type = lib.Type,
-                HubsEnabled = r.SelectedSubOptionIds.Contains("hubs"),
-                PlaylistsEnabled = r.SelectedSubOptionIds.Contains("playlists"),
-            });
+                mapped.Add(new PlexLibraryMapping
+                {
+                    Key = lib.Key,
+                    Title = lib.Title,
+                    Type = lib.Type,
+                    HubsEnabled = r.SelectedSubOptionIds.Contains("hubs"),
+                    PlaylistsEnabled = r.SelectedSubOptionIds.Contains("playlists"),
+                });
+            }
+            else if (dvrs.TryGetValue(r.OptionId, out var dvr))
+            {
+                // A Live TV DVR — persisted as a synthetic "livetv"-type library so it renders as a tile.
+                mapped.Add(new PlexLibraryMapping
+                {
+                    Key = dvr.Key,
+                    Title = dvr.Title,
+                    Type = PlexSourceProvider.LiveTvType,
+                });
+            }
         }
 
         result[PlexSourceProvider.KeyLibraries] = JsonSerializer.Serialize(mapped);
@@ -489,6 +578,58 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
 
     private static string? Get(IReadOnlyDictionary<string, string?> values, string key)
         => values.TryGetValue(key, out var v) ? v : null;
+
+    // ── IPlaybackReportable / IPlaybackSuccessReportable (Live TV ⊘ badge) ──────
+    // Live channel play can fail transiently when all physical tuners are busy (shared with the
+    // user's real viewing). We keep such channels visible and playable, badged ⊘, and self-heal on a
+    // successful play. Only live-channel item ids ("livetv:…") participate; other Plex items ignore it.
+
+    public bool ReportPlaybackFailure(string itemId, PlaybackFailureKind kind)
+    {
+        if (string.IsNullOrEmpty(itemId) || !itemId.StartsWith("livetv:", StringComparison.Ordinal))
+            return false;
+        lock (_deadGate) _dead.Add(itemId);
+        _host?.Log(LogLevel.Info, $"Plex Live TV: '{itemId}' play failed — badged unavailable (retryable).");
+        return false; // stays playable; the ⊘ badge conveys the state
+    }
+
+    public bool ReportPlaybackSuccess(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId)) return false;
+        lock (_deadGate)
+        {
+            if (_dead.Remove(itemId))
+            {
+                _host?.Log(LogLevel.Debug, $"Plex Live TV: '{itemId}' played — cleared unavailable badge.");
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private bool IsDead(string itemId)
+    {
+        lock (_deadGate) return _dead.Contains(itemId);
+    }
+
+    // ── IPlaybackStoppable ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Playback of a Plex item stopped. Only Live TV holds a stateful resource (a tuner session), so
+    /// we stop the active session to release its physical tuner. On-demand items are stateless and
+    /// need nothing. Best-effort and non-blocking; never throws.
+    /// </summary>
+    public void ReleasePlayback(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId) || !itemId.StartsWith("livetv:", StringComparison.Ordinal))
+            return;
+        // Fire-and-forget the network teardown so we don't block the host's play/stop path.
+        _ = Task.Run(async () =>
+        {
+            try { await _liveTv.StopActiveAsync(); }
+            catch (Exception ex) { _host?.Log(LogLevel.Debug, $"Plex Live TV: ReleasePlayback failed: {ex.Message}"); }
+        });
+    }
 
     private static List<PlexLibraryMapping> ParseLibraries(string? json)
     {

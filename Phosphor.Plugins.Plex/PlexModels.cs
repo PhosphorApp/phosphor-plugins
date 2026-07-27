@@ -70,3 +70,57 @@ public sealed class PlexLibraryMapping
         set => SubFlags["playlists"] = value;
     }
 }
+
+// ── Live TV ─────────────────────────────────────────────────────────────────
+
+/// <summary>
+/// A Plex Live TV DVR reference. A Plex server hosts zero or more DVRs (each backed by a physical
+/// tuner such as an HDHomeRun), exposing an EPG provider and a live channel lineup. The
+/// <see cref="Key"/> (e.g. "13") is used to tune channels; the <see cref="EpgIdentifier"/> (e.g.
+/// "tv.plex.providers.epg.cloud:13") addresses the lineup/grid endpoints.
+/// </summary>
+public sealed class PlexDvr
+{
+    public string Key { get; set; } = "";
+    public string EpgIdentifier { get; set; } = "";
+    public string Title { get; set; } = "Live TV";
+}
+
+/// <summary>
+/// One live channel in a DVR's lineup (from <c>/{epg}/lineups/dvr/channels</c>), optionally enriched
+/// with the program airing right now (from the EPG <c>/grid</c>). <see cref="Id"/> is the Plex
+/// channelIdentifier used to tune.
+/// </summary>
+public sealed class PlexLiveChannel
+{
+    public string Id { get; set; } = "";
+    public string Vcn { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string CallSign { get; set; } = "";
+    public string? ThumbnailUrl { get; set; }
+    public bool IsHd { get; set; }
+
+    /// <summary>The program on this channel right now, or <c>null</c> when the grid had nothing.</summary>
+    public string? CurrentProgram { get; set; }
+}
+
+/// <summary>
+/// A live-playback session opened for a channel: the tuner-holding transcode session id and the
+/// resolved HLS master-manifest URL. Owned by <c>PlexLiveTvService</c> so it can keep-alive and, most
+/// importantly, stop the session (releasing the physical tuner). A missed stop pins a tuner until
+/// Plex's idle timeout, so the service tears down the prior session before opening a new one.
+/// </summary>
+public sealed class PlexLiveSession
+{
+    public string ChannelId { get; set; } = "";
+
+    /// <summary>Our client-generated id used for the universal transcode (manifest + keep-alive +
+    /// transcode stop). Plex spins up the playable HLS transcode under this id.</summary>
+    public string PlaybackSessionId { get; set; } = "";
+
+    /// <summary>Plex's server-assigned live-session id (from the tune Part key) — the grab operation
+    /// that holds the physical tuner. Must be stopped to release the tuner.</summary>
+    public string TunerSessionId { get; set; } = "";
+
+    public string ManifestUrl { get; set; } = "";
+}

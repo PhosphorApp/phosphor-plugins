@@ -22,6 +22,9 @@ internal enum PlexNodeKind
     PlaylistList,
     /// <summary>A single playlist — expands to its items.</summary>
     Playlist,
+    /// <summary>A Live TV tile — expands to the DVR's live channel lineup. <see cref="PlexNode.Key"/>
+    /// carries the DVR key. Root-level tile, presented like a library.</summary>
+    LiveTv,
 }
 
 /// <summary>
@@ -32,3 +35,10 @@ internal enum PlexNodeKind
 /// <param name="Key">The Plex key/ratingKey/hubKey the node addresses (meaning depends on <paramref name="Kind"/>).</param>
 /// <param name="LibraryType">The owning library's type ("artist" for music, else video); drives child shapes.</param>
 internal sealed record PlexNode(PlexNodeKind Kind, string Key, string? LibraryType = null);
+
+/// <summary>
+/// Identifies a live channel to play: the DVR key plus the Plex channelIdentifier. Carried in a live
+/// channel <see cref="Phosphor.Plugin.Abstractions.SourceItem.SourceState"/> so the resolver can open
+/// a tuner session without re-browsing. Opaque to the host.
+/// </summary>
+internal sealed record PlexLiveRef(string DvrKey, string ChannelId);

@@ -106,7 +106,42 @@ internal static class PlexMappings
         SourceState = new PlexNode(PlexNodeKind.Playlist, pl.RatingKey),
     };
 
-    // ── Playback / metadata ────────────────────────────────────────────────────
+    // ── Live TV ────────────────────────────────────────────────────────────────
+
+    /// <summary>Maps a Live TV DVR to a root <see cref="SourceCategory"/> tile (presented like a
+    /// library). The <paramref name="displayNamePrefix"/> is prepended so it reads e.g. "Plex Live TV".</summary>
+    public static SourceCategory LiveTvRootCategory(PlexDvr dvr, string instanceId, string? displayNamePrefix = null) => new()
+    {
+        SourceInstanceId = instanceId,
+        CategoryId = $"livetv:{dvr.Key}",
+        Title = string.IsNullOrWhiteSpace(displayNamePrefix) ? "Live TV" : $"{displayNamePrefix} Live TV",
+        Icon = "📺",
+        HasSubCategories = true,
+        SourceState = new PlexNode(PlexNodeKind.LiveTv, dvr.Key, PlexSourceProvider.LiveTvType),
+    };
+
+    /// <summary>Maps a live channel to a playable leaf <see cref="SourceItem"/>. The channel id is
+    /// carried in <see cref="SourceItem.SourceState"/> so <c>ResolveAsync</c> can tune it. The title
+    /// is enriched with the current program when the grid provided one (e.g. "2.1 CBS – News").</summary>
+    public static SourceItem LiveChannelToSourceItem(PlexLiveChannel ch, string dvrKey, string instanceId, bool unavailable = false)
+    {
+        var name = string.IsNullOrEmpty(ch.Vcn) ? ch.Title : $"{ch.Vcn} {ch.Title}";
+        var title = string.IsNullOrEmpty(ch.CurrentProgram) ? name : $"{name} – {ch.CurrentProgram}";
+        return new SourceItem
+        {
+            SourceInstanceId = instanceId,
+            ItemId = $"livetv:{dvrKey}:{ch.Id}",
+            Title = title,
+            Subtitle = string.IsNullOrEmpty(ch.CallSign) ? null : ch.CallSign,
+            ThumbnailUrl = ch.ThumbnailUrl,
+            IsContainer = false,
+            IsLiveStream = true,
+            ShowLiveBadge = false, // all channels are live; don't badge every row
+            ShowUnavailableBadge = unavailable,
+            // Carry the DVR key + channel id so the resolver can open a live session.
+            SourceState = new PlexLiveRef(dvrKey, ch.Id),
+        };
+    }
 
     /// <summary>
     /// Maps a resolved Plex <see cref="VideoItem"/> to a <see cref="ResolvedStream"/>. Plex

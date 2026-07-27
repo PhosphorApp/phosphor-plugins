@@ -19,6 +19,15 @@ public sealed class PlexSourceProvider : IPhosphorSourceProvider
 
     public const string ActionBrowseLibraries = "browseLibraries";
 
+    /// <summary>Synthetic library "type" marking a Live TV tile in the persisted library mapping.</summary>
+    public const string LiveTvType = "livetv";
+
+    /// <summary>True when a persisted library mapping type denotes Live TV. Tolerant of spacing/case
+    /// (the host derives the type by parsing the option label, so "live tv" can occur too).</summary>
+    public static bool IsLiveTvType(string? type)
+        => !string.IsNullOrEmpty(type) &&
+           string.Equals(type.Replace(" ", ""), LiveTvType, StringComparison.OrdinalIgnoreCase);
+
     public string TypeId => PlexTypeId;
     public string DisplayName => "Plex";
     public string? Description =>
