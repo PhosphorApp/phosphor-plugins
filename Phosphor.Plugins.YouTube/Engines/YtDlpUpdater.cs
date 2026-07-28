@@ -54,8 +54,21 @@ public sealed class YtDlpUpdater
         string stderr;
         try
         {
-            (code, _, stderr) = await YtDlpVideoEngine.RunYtDlpAsync(
-                _ytDlpPath, new[] { "--update-to", "stable" }, ct, _log);
+            // The self-update replaces yt-dlp.exe on disk, so it must not run while a background
+            // cache/prefetch DOWNLOAD is mid-flight against the same exe. Downloads use a separate
+            // gate (YtDlpVideoEngine.DownloadGate) from interactive resolves, so hold BOTH here:
+            // RunYtDlpAsync already serializes against resolves via ProcessGate; wrapping it in
+            // DownloadGate additionally blocks (and is blocked by) in-flight downloads.
+            await YtDlpVideoEngine.DownloadGate.WaitAsync(ct);
+            try
+            {
+                (code, _, stderr) = await YtDlpVideoEngine.RunYtDlpAsync(
+                    _ytDlpPath, new[] { "--update-to", "stable" }, ct, _log);
+            }
+            finally
+            {
+                YtDlpVideoEngine.DownloadGate.Release();
+            }
         }
         catch (Exception ex)
         {

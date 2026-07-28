@@ -199,7 +199,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
     /// </summary>
     private async Task<string?> DownloadOneAsync(string url, string format, string outputTemplate, CancellationToken ct)
     {
-        var (exitCode, stdout, stderr) = await RunAsync(new[]
+        var (exitCode, stdout, stderr) = await RunDownloadAsync(new[]
         {
             "--no-warnings",
             "-f", format,
@@ -228,7 +228,9 @@ public sealed class YtDlpVideoEngine : IVideoEngine
     /// <summary>Resolves the "WxH" resolution of the selected video format (no download).</summary>
     private async Task<string> GetResolutionAsync(string url, string videoFormat, CancellationToken ct)
     {
-        var (exitCode, stdout, _) = await RunAsync(new[]
+        // Called only from the download path (DownloadStreamsAsync), so run it on the DownloadGate
+        // to keep the whole download sequence off the interactive ProcessGate.
+        var (exitCode, stdout, _) = await RunDownloadAsync(new[]
         {
             "--no-warnings",
             "-f", videoFormat,
@@ -245,18 +247,42 @@ public sealed class YtDlpVideoEngine : IVideoEngine
         => await RunYtDlpAsync(_ytDlpPath, args, ct, _log);
 
     /// <summary>
-    /// Serializes all <c>yt-dlp.exe</c> invocations (resolve / download / metadata /
-    /// self-update) through a single process gate. This prevents the updater from
-    /// replacing the exe while a resolve or download is mid-flight against it, and
-    /// vice-versa. Shared by <see cref="YtDlpUpdater"/>.
+    /// Runs <c>yt-dlp.exe</c> on the background <see cref="DownloadGate"/> (for cache/prefetch
+    /// downloads), so a long download never blocks an interactive resolve on <see cref="ProcessGate"/>.
+    /// </summary>
+    private async Task<(int exitCode, string stdout, string stderr)> RunDownloadAsync(
+        IReadOnlyList<string> args, CancellationToken ct)
+        => await RunYtDlpOnGateAsync(DownloadGate, _ytDlpPath, args, ct, _log);
+
+    /// <summary>
+    /// Serializes interactive <c>yt-dlp.exe</c> invocations (resolve / metadata / self-update /
+    /// version) through a single process gate. This prevents the updater from replacing the exe
+    /// while a resolve is mid-flight against it, and vice-versa. Shared by <see cref="YtDlpUpdater"/>.
+    ///
+    /// Downloads use the SEPARATE <see cref="DownloadGate"/> instead, so a long cache download (a
+    /// full concert can run for minutes) does NOT block interactive playback stream resolution —
+    /// which would otherwise queue behind the download and trip the player's first-frame watchdog.
     /// </summary>
     internal static readonly SemaphoreSlim ProcessGate = new(1, 1);
 
+    /// <summary>
+    /// Serializes background cache/prefetch DOWNLOADS separately from interactive resolves (see
+    /// <see cref="ProcessGate"/>). Downloads stay serialized among themselves (one at a time, to
+    /// avoid doubling network/CPU), but never block a resolve the play path needs. The updater
+    /// acquires BOTH gates so its exe-swap protection still holds against an in-flight download.
+    /// </summary>
+    internal static readonly SemaphoreSlim DownloadGate = new(1, 1);
+
     /// <summary>Runs <c>yt-dlp.exe</c> with the given args under <see cref="ProcessGate"/>.</summary>
-    internal static async Task<(int exitCode, string stdout, string stderr)> RunYtDlpAsync(
+    internal static Task<(int exitCode, string stdout, string stderr)> RunYtDlpAsync(
         string ytDlpPath, IReadOnlyList<string> args, CancellationToken ct, PluginLog? log = null)
+        => RunYtDlpOnGateAsync(ProcessGate, ytDlpPath, args, ct, log);
+
+    /// <summary>Runs <c>yt-dlp.exe</c> under the given gate (see <see cref="ProcessGate"/> / <see cref="DownloadGate"/>).</summary>
+    internal static async Task<(int exitCode, string stdout, string stderr)> RunYtDlpOnGateAsync(
+        SemaphoreSlim gate, string ytDlpPath, IReadOnlyList<string> args, CancellationToken ct, PluginLog? log = null)
     {
-        await ProcessGate.WaitAsync(ct);
+        await gate.WaitAsync(ct);
         try
         {
             var psi = new ProcessStartInfo
@@ -282,7 +308,7 @@ public sealed class YtDlpVideoEngine : IVideoEngine
         }
         finally
         {
-            ProcessGate.Release();
+            gate.Release();
         }
     }
 
