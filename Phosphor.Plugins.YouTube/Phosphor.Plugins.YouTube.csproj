@@ -44,6 +44,11 @@
 	<Content Include="default_categories.json">
 	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 	</Content>
+	<!-- Code-tunable yt-dlp download-throttle knobs (anti-403). Testers edit this next to the DLL
+		 and restart; no recompile. Only the on/off master switch is a user setting. -->
+	<Content Include="download_throttle.json">
+	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</Content>
   </ItemGroup>
 
   <!--
@@ -61,6 +66,7 @@
 	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
 	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
 	  <SelfDeployFiles Include="$(TargetDir)default_categories.json" Condition="Exists('$(TargetDir)default_categories.json')" />
+	  <SelfDeployFiles Include="$(TargetDir)download_throttle.json" Condition="Exists('$(TargetDir)download_throttle.json')" />
 	</ItemGroup>
 	<MakeDir Directories="$(HostPluginDest)" />
 	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
