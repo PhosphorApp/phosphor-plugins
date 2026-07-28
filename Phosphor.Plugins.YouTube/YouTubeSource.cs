@@ -241,6 +241,10 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     public async Task<ResolvedStream?> ResolveAsync(
         SourceItem item, PlaybackPreferences prefs, CancellationToken ct = default)
     {
+        // Identify the active video engine on the playback path — otherwise the log is silent about
+        // whether a resolve/stream used yt-dlp or YoutubeExplode (they are configured independently of
+        // the search engine), which makes throttling/403 issues hard to attribute.
+        _host?.Log(LogLevel.Debug, $"YouTubeSource: resolve via {_videoKind} (audioOnly={prefs.AudioOnly})");
         var streams = await _video.ResolveStreamsAsync(
             YouTubeMappings.VideoIdOf(item),
             MapQuality(prefs.MaxQuality),
@@ -269,6 +273,10 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
         // The existing engine does not surface incremental progress; report start/finish
         // so callers relying on the hook still see terminal states.
         progress?.Report(0);
+        // Identify the active video engine on the download (cache/prefetch) path. YouTube throttles
+        // downloads (403) far more aggressively than resolves, so attributing the engine here makes
+        // those failures diagnosable at a glance.
+        _host?.Log(LogLevel.Debug, $"YouTubeSource: download via {_videoKind} (dir={destinationDir})");
         var download = await _video.DownloadStreamsAsync(
             YouTubeMappings.VideoIdOf(item),
             MapQuality(prefs.MaxQuality),
