@@ -11,6 +11,11 @@ namespace Phosphor.Plugins.Jellyfin;
 /// </summary>
 internal sealed record JellyfinState(string ItemId, bool IsAudioOnly);
 
+/// <summary>Carried in a live-channel <see cref="SourceItem.SourceState"/> so the resolver can open a
+/// live stream for the channel without re-browsing. Distinct from <see cref="JellyfinState"/> so the
+/// resolver can tell a live channel from an ordinary item.</summary>
+internal sealed record JellyfinLiveRef(string ChannelId);
+
 /// <summary>
 /// Jellyfin source instance. Browses the server's libraries as a folder tree (containers become
 /// drill-in tiles, leaves become playable items), searches across the library, and resolves items
@@ -22,7 +27,7 @@ internal sealed record JellyfinState(string ItemId, bool IsAudioOnly);
 /// </summary>
 public sealed class JellyfinSource :
     IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IConfigurable,
-    IFavoritable, IFavoriteCapture
+    IFavoritable, IFavoriteCapture, IPlaybackStoppable, IPlaybackReportable, IPlaybackSuccessReportable
 {
     private JellyfinClient? _client;
     private IPluginHost? _host;
@@ -32,6 +37,20 @@ public sealed class JellyfinSource :
     private string _password = "";
     private bool _stereoAudio;
     private List<string> _selectedLibraryIds = [];
+
+    // Ids of the server's Live TV view(s), captured during GetRootCategoriesAsync so BrowseAsync can
+    // route them to the channel lineup instead of a generic folder listing.
+    private readonly HashSet<string> _liveTvViewIds = new(StringComparer.Ordinal);
+
+    // The single active live-TV playback session (one tuner at a time), tracked so it can be torn
+    // down on stop/skip/shutdown via IPlaybackStoppable.
+    private readonly object _liveGate = new();
+    private JellyfinLiveSession? _activeLive;
+
+    // Channels the host reported as failed to play (tuner busy, brief outage). Not hidden — the
+    // channel stays visible and playable, badged ⊘, self-healing on a successful play.
+    private readonly object _deadGate = new();
+    private readonly HashSet<string> _dead = new(StringComparer.Ordinal);
 
     public JellyfinSource(string instanceId, IReadOnlyDictionary<string, string?> settings)
     {
@@ -133,6 +152,9 @@ public sealed class JellyfinSource :
             if (_selectedLibraryIds.Count > 0 && !_selectedLibraryIds.Contains(v.Id))
                 continue;
 
+            var isLiveTv = string.Equals(v.CollectionType, "livetv", StringComparison.OrdinalIgnoreCase);
+            if (isLiveTv) _liveTvViewIds.Add(v.Id);
+
             yield return new SourceCategory
             {
                 SourceInstanceId = InstanceId,
@@ -154,6 +176,10 @@ public sealed class JellyfinSource :
         if (_client is null) return new BrowseResult();
 
         var parentId = (category.SourceState as JellyfinState)?.ItemId ?? category.CategoryId;
+
+        // Live TV view → list channels as playable live leaves (not generic folder items).
+        if (await IsLiveTvViewAsync(parentId, ct))
+            return await BrowseLiveTvAsync(ct);
 
         JellyfinPage page;
         try
@@ -178,6 +204,45 @@ public sealed class JellyfinSource :
         }
 
         return new BrowseResult { Categories = categories, Items = items };
+    }
+
+    /// <summary>True when a browse-node id is (one of) the server's Live TV view(s). Uses the set
+    /// captured during root enumeration, falling back to a live lookup for durable navigation where
+    /// the roots weren't enumerated first.</summary>
+    private async Task<bool> IsLiveTvViewAsync(string id, CancellationToken ct)
+    {
+        lock (_liveGate) { }
+        if (_liveTvViewIds.Contains(id)) return true;
+        if (_client is null) return false;
+        try
+        {
+            var views = await _client.GetViewsAsync(ct);
+            foreach (var v in views)
+                if (string.Equals(v.CollectionType, "livetv", StringComparison.OrdinalIgnoreCase))
+                    _liveTvViewIds.Add(v.Id);
+        }
+        catch { /* best-effort */ }
+        return _liveTvViewIds.Contains(id);
+    }
+
+    /// <summary>Lists the server's live channels as playable live leaves (⊘ badge when a channel was
+    /// previously reported unavailable).</summary>
+    private async Task<BrowseResult> BrowseLiveTvAsync(CancellationToken ct)
+    {
+        if (_client is null) return new BrowseResult();
+        IReadOnlyList<JellyfinLiveChannel> channels;
+        try
+        {
+            channels = await _client.GetLiveChannelsAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _host?.Log(LogLevel.Warning, $"JellyfinSource: GetLiveChannels failed — {ex.Message}");
+            return new BrowseResult();
+        }
+
+        var items = channels.Select(ToLiveItem).ToList();
+        return new BrowseResult { Items = items };
     }
 
     // ── ITextSearchCapable ───────────────────────────────────────────────────────
@@ -214,6 +279,27 @@ public sealed class JellyfinSource :
     {
         EnsureClient();
         if (_client is null) return null;
+
+        // Live TV: open a live stream (server tunes + transcodes UDP→HLS) and return its URL. One tuner
+        // at a time — opening a new channel closes the prior session first.
+        if (item.SourceState is JellyfinLiveRef live)
+        {
+            try
+            {
+                await ReleaseActiveLiveAsync(ct);
+                var session = await _client.OpenLiveStreamAsync(live.ChannelId, ct);
+                lock (_liveGate) _activeLive = session;
+                return new ResolvedStream(StreamTransport.Http, StreamLayout.Muxed, session.StreamUrl)
+                {
+                    IsLiveStream = true,
+                };
+            }
+            catch (Exception ex)
+            {
+                _host?.Log(LogLevel.Warning, $"JellyfinSource: open live channel '{live.ChannelId}' failed — {ex.Message}");
+                throw; // let the host report the failure so the ⊘ badge is applied
+            }
+        }
 
         var state = item.SourceState as JellyfinState;
         var itemId = state?.ItemId ?? item.ItemId;
@@ -263,6 +349,58 @@ public sealed class JellyfinSource :
         return new SourceMetadata(item.Duration, null, chapters);
     }
 
+    // ── IPlaybackStoppable / retryable ⊘ badge ────────────────────────────────────
+
+    /// <summary>Playback of an item stopped. For Live TV, close the active session to release the
+    /// tuner/transcode. Non-live items are stateless and need nothing. Best-effort; never throws.</summary>
+    public void ReleasePlayback(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId) || !itemId.StartsWith("livetv:", StringComparison.Ordinal))
+            return;
+        _ = Task.Run(async () =>
+        {
+            try { await ReleaseActiveLiveAsync(CancellationToken.None); }
+            catch (Exception ex) { _host?.Log(LogLevel.Debug, $"JellyfinSource: ReleasePlayback failed — {ex.Message}"); }
+        });
+    }
+
+    /// <summary>Closes the currently-tracked live session (if any).</summary>
+    private async Task ReleaseActiveLiveAsync(CancellationToken ct)
+    {
+        JellyfinLiveSession? s;
+        lock (_liveGate) { s = _activeLive; _activeLive = null; }
+        if (s is not null && _client is not null)
+            await _client.CloseLiveStreamAsync(s, ct);
+    }
+
+    public bool ReportPlaybackFailure(string itemId, PlaybackFailureKind kind)
+    {
+        if (string.IsNullOrEmpty(itemId) || !itemId.StartsWith("livetv:", StringComparison.Ordinal))
+            return false;
+        lock (_deadGate) _dead.Add(itemId);
+        _host?.Log(LogLevel.Info, $"Jellyfin Live TV: '{itemId}' play failed — badged unavailable (retryable).");
+        return false; // stays playable; the ⊘ badge conveys the state
+    }
+
+    public bool ReportPlaybackSuccess(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId)) return false;
+        lock (_deadGate)
+        {
+            if (_dead.Remove(itemId))
+            {
+                _host?.Log(LogLevel.Debug, $"Jellyfin Live TV: '{itemId}' played — cleared unavailable badge.");
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private bool IsDead(string itemId)
+    {
+        lock (_deadGate) return _dead.Contains(itemId);
+    }
+
     // ── Mapping ──────────────────────────────────────────────────────────────────
 
     private SourceCategory ToCategory(JellyfinItem it) => new()
@@ -288,6 +426,25 @@ public sealed class JellyfinSource :
             IsAudioOnly = audioOnly,
             Duration = it.Duration,
             SourceState = new JellyfinState(it.Id, audioOnly),
+        };
+    }
+
+    /// <summary>Maps a live channel to a playable live leaf. The title is enriched with the current
+    /// program when guide data is present (e.g. "2.1 WFMY-HD – Evening News"). Resolution is deferred
+    /// to play time (a live ref in SourceState) so browsing never opens a tuner.</summary>
+    private SourceItem ToLiveItem(JellyfinLiveChannel ch)
+    {
+        var name = string.IsNullOrEmpty(ch.ChannelNumber) ? ch.Name : $"{ch.ChannelNumber} {ch.Name}";
+        var title = string.IsNullOrEmpty(ch.CurrentProgram) ? name : $"{name} – {ch.CurrentProgram}";
+        return new SourceItem
+        {
+            SourceInstanceId = InstanceId,
+            ItemId = $"livetv:{ch.Id}",
+            Title = title,
+            ThumbnailUrl = _client?.GetImageUrl(ch.Id, ch.ImageTag),
+            IsLiveStream = true,
+            ShowUnavailableBadge = IsDead($"livetv:{ch.Id}"),
+            SourceState = new JellyfinLiveRef(ch.Id),
         };
     }
 

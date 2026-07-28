@@ -23,6 +23,27 @@ public sealed record JellyfinItem(
 /// <summary>One page of a browse/search query.</summary>
 public sealed record JellyfinPage(IReadOnlyList<JellyfinItem> Items, int TotalCount);
 
+/// <summary>A live TV channel from <c>/LiveTv/Channels</c>: a normal item plus its channel number and
+/// the program airing right now (when guide data is present).</summary>
+public sealed record JellyfinLiveChannel(
+    string Id,
+    string Name,
+    string? ChannelNumber,
+    string? ImageTag,
+    string? CurrentProgram);
+
+/// <summary>
+/// An opened live-TV playback session: the ready-to-play (server-absolute) HLS URL plus the ids
+/// needed to tear it down. <see cref="PlaySessionId"/> reports playback stopped (releases the tuner);
+/// <see cref="LiveStreamId"/> is the opened media source. Owned by the source so it can close the
+/// session on stop/skip/shutdown.
+/// </summary>
+public sealed record JellyfinLiveSession(
+    string ChannelId,
+    string StreamUrl,
+    string PlaySessionId,
+    string? LiveStreamId);
+
 /// <summary>A single chapter marker on a Jellyfin item.</summary>
 public sealed record JellyfinChapter(string Name, TimeSpan Start);
 
@@ -302,6 +323,174 @@ public sealed class JellyfinClient
             list.Add(new JellyfinChapter(name, TimeSpan.FromSeconds(ticks / (double)TicksPerSecond)));
         }
         return list;
+    }
+
+    // ── Live TV ─────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Lists the server's Live TV channels via <c>GET /LiveTv/Channels</c>, requesting the current
+    /// program so channel titles can show "what's on now" when guide data exists. Channel order is by
+    /// the server's channel number.
+    /// </summary>
+    public async Task<IReadOnlyList<JellyfinLiveChannel>> GetLiveChannelsAsync(CancellationToken ct = default)
+    {
+        await AuthenticateAsync(ct);
+        var url = $"{_serverUrl}/LiveTv/Channels?userId={_userId}"
+                + "&Fields=CurrentProgram&EnableImageTypes=Primary&ImageTypeLimit=1&SortBy=SortName";
+        using var doc = await GetJsonAsync(url, ct);
+
+        var list = new List<JellyfinLiveChannel>();
+        if (!doc.RootElement.TryGetProperty("Items", out var items) || items.ValueKind != JsonValueKind.Array)
+            return list;
+
+        foreach (var c in items.EnumerateArray())
+        {
+            var id = Str(c, "Id");
+            if (string.IsNullOrEmpty(id)) continue;
+            string? imageTag = null;
+            if (c.TryGetProperty("ImageTags", out var tags) && tags.ValueKind == JsonValueKind.Object &&
+                tags.TryGetProperty("Primary", out var pt) && pt.ValueKind == JsonValueKind.String)
+                imageTag = pt.GetString();
+
+            string? current = null;
+            if (c.TryGetProperty("CurrentProgram", out var cp) && cp.ValueKind == JsonValueKind.Object)
+                current = Str(cp, "Name") is { Length: > 0 } n ? n : null;
+
+            list.Add(new JellyfinLiveChannel(
+                Id: id,
+                Name: Str(c, "Name") is { Length: > 0 } nm ? nm : id,
+                ChannelNumber: Str(c, "ChannelNumber") is { Length: > 0 } num ? num : null,
+                ImageTag: imageTag,
+                CurrentProgram: current));
+        }
+
+        return list.OrderBy(c => ParseChannelNumber(c.ChannelNumber)).ToList();
+    }
+
+    /// <summary>
+    /// Opens a live playback session for a channel. Live TV can't direct-play here (UDP tuner feed), so
+    /// this asks the server (<c>POST /Items/{id}/PlaybackInfo?AutoOpenLiveStream=true</c>) to open the
+    /// stream and hand back a transcoded HLS URL. Returns the ready-to-play (server-absolute) URL plus
+    /// the ids needed to tear the session down. Throws on failure (e.g. all tuners busy).
+    /// </summary>
+    public async Task<JellyfinLiveSession> OpenLiveStreamAsync(string channelId, CancellationToken ct = default)
+    {
+        await AuthenticateAsync(ct);
+
+        // Empty DirectPlayProfiles + an HLS transcoding profile → the server returns a TranscodingUrl.
+        var profile = new
+        {
+            UserId = _userId,
+            AutoOpenLiveStream = true,
+            DeviceProfile = new
+            {
+                MaxStreamingBitrate = 120_000_000,
+                DirectPlayProfiles = Array.Empty<object>(),
+                TranscodingProfiles = new[]
+                {
+                    new
+                    {
+                        Container = "ts",
+                        Type = "Video",
+                        VideoCodec = "h264",
+                        AudioCodec = _stereoAudio ? "aac" : "aac,ac3,mp3",
+                        Protocol = "hls",
+                        Context = "Streaming",
+                        MaxAudioChannels = _stereoAudio ? "2" : "6",
+                    },
+                },
+            },
+        };
+
+        var body = JsonSerializer.Serialize(profile);
+        using var req = new HttpRequestMessage(HttpMethod.Post,
+            $"{_serverUrl}/Items/{Uri.EscapeDataString(channelId)}/PlaybackInfo?userId={_userId}")
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
+        };
+        req.Headers.TryAddWithoutValidation("X-Emby-Authorization", AuthHeaderValue);
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        using var resp = await _http.SendAsync(req, ct);
+        resp.EnsureSuccessStatusCode();
+        using var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+        var root = doc.RootElement;
+
+        var playSessionId = Str(root, "PlaySessionId");
+        if (!root.TryGetProperty("MediaSources", out var sources) || sources.ValueKind != JsonValueKind.Array)
+            throw new InvalidOperationException("Jellyfin PlaybackInfo returned no media sources for the channel.");
+
+        // Prefer the source Jellyfin opened (it carries a LiveStreamId + TranscodingUrl).
+        JsonElement chosen = default;
+        var haveChosen = false;
+        foreach (var s in sources.EnumerateArray())
+        {
+            if (Str(s, "TranscodingUrl") is { Length: > 0 })
+            {
+                chosen = s;
+                haveChosen = true;
+                break;
+            }
+        }
+        if (!haveChosen)
+            throw new InvalidOperationException("Jellyfin did not provide a playable Live TV stream (no TranscodingUrl).");
+
+        var transcodingUrl = Str(chosen, "TranscodingUrl");
+        var liveStreamId = Str(chosen, "LiveStreamId");
+        // TranscodingUrl is server-relative; make it absolute.
+        var streamUrl = transcodingUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+            ? transcodingUrl
+            : _serverUrl + transcodingUrl;
+
+        _log?.Invoke($"JellyfinClient: opened Live TV stream for channel {channelId} (playSession={playSessionId}).");
+        return new JellyfinLiveSession(channelId, streamUrl,
+            string.IsNullOrEmpty(playSessionId) ? "" : playSessionId,
+            string.IsNullOrEmpty(liveStreamId) ? null : liveStreamId);
+    }
+
+    /// <summary>
+    /// Closes a live playback session, releasing the transcode (and prompting the server to release
+    /// the tuner). Reports playback stopped (<c>POST /Sessions/Playing/Stopped</c>) — the reliable
+    /// teardown — and best-effort closes the live stream. Never throws.
+    /// </summary>
+    public async Task CloseLiveStreamAsync(JellyfinLiveSession session, CancellationToken ct = default)
+    {
+        try
+        {
+            await AuthenticateAsync(ct);
+            var stopped = JsonSerializer.Serialize(new { PlaySessionId = session.PlaySessionId, ItemId = session.ChannelId });
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_serverUrl}/Sessions/Playing/Stopped")
+            {
+                Content = new StringContent(stopped, Encoding.UTF8, "application/json"),
+            };
+            req.Headers.TryAddWithoutValidation("X-Emby-Authorization", AuthHeaderValue);
+            using var resp = await _http.SendAsync(req, ct);
+            _log?.Invoke($"JellyfinClient: reported Live TV stopped for {session.ChannelId} (HTTP {(int)resp.StatusCode}).");
+
+            if (!string.IsNullOrEmpty(session.LiveStreamId))
+            {
+                var closeBody = JsonSerializer.Serialize(new { LiveStreamId = session.LiveStreamId });
+                using var creq = new HttpRequestMessage(HttpMethod.Post, $"{_serverUrl}/LiveStreams/Close")
+                {
+                    Content = new StringContent(closeBody, Encoding.UTF8, "application/json"),
+                };
+                creq.Headers.TryAddWithoutValidation("X-Emby-Authorization", AuthHeaderValue);
+                using var cresp = await _http.SendAsync(creq, ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke($"JellyfinClient: CloseLiveStream failed for {session.ChannelId}: {ex.Message}");
+        }
+    }
+
+    private static (int Major, int Minor) ParseChannelNumber(string? number)
+    {
+        var parts = (number ?? "").Split('.', 2);
+        int.TryParse(parts[0], out var major);
+        var minor = 0;
+        if (parts.Length > 1) int.TryParse(parts[1], out minor);
+        return (major, minor);
     }
 
     // ── Connection test ─────────────────────────────────────────────────────────
