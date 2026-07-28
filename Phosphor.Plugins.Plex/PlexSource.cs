@@ -445,6 +445,7 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
             return new ResolvedStream(StreamTransport.Http, StreamLayout.Muxed, session.ManifestUrl)
             {
                 IsLiveStream = true,
+                StartupTimeout = TimeSpan.FromSeconds(30),
                 HttpHeaders = PlexLiveTvService.ManifestHeaders(session),
             };
         }

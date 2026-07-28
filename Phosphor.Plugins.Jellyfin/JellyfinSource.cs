@@ -292,6 +292,7 @@ public sealed class JellyfinSource :
                 return new ResolvedStream(StreamTransport.Http, StreamLayout.Muxed, session.StreamUrl)
                 {
                     IsLiveStream = true,
+                    StartupTimeout = TimeSpan.FromSeconds(30),
                 };
             }
             catch (Exception ex)
