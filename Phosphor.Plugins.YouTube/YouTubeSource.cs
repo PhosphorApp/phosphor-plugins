@@ -114,6 +114,11 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
         _quality = ParseEnum(values, YouTubeSourceProvider.KeyVideoQuality, VideoQualityPreference.High);
         _preferStereo = ParseBool(values, YouTubeSourceProvider.KeyPreferStereo, true);
 
+        // Master on/off switch for the yt-dlp download-path throttle (anti-403). The detailed knobs
+        // live in download_throttle.json; this just toggles whether they're applied. Static, so it
+        // spans engine rebuilds triggered by settings changes.
+        YtDlpVideoEngine.ThrottleDownloads = ParseBool(values, YouTubeSourceProvider.KeyThrottleDownloads, true);
+
         // Load the user's categories from the persisted blob; seed from the plug-in defaults on
         // first run (empty/absent blob) so a fresh instance still ships the baked-in tiles.
         LoadCategories(values.TryGetValue(YouTubeSourceProvider.KeyCategories, out var catJson) ? catJson : null);

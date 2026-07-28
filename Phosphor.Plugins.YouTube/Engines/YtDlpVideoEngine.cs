@@ -20,10 +20,54 @@ public sealed class YtDlpVideoEngine : IVideoEngine
     private readonly string _ytDlpPath;
     private readonly PluginLog? _log;
 
+    // ── Download throttling (mitigation 1) ──
+    // YouTube 403-throttles concurrent stream + full-media download of the same item. These
+    // knobs keep the cache/prefetch DOWNLOAD path polite so it is less likely to trip anti-abuse
+    // heuristics. The VALUES below are defaults; they are overridden at startup from the bundled
+    // download_throttle.json (via DownloadThrottleConfig) so testers can tune without recompiling.
+    // The on/off master switch (ThrottleDownloads) is a USER setting, applied by YouTubeSource —
+    // it is NOT read from the JSON. Set a value to null/false to omit the corresponding arg.
+
+    /// <summary>Master switch for the download-path throttle args. When false, downloads run
+    /// unthrottled (original behavior).</summary>
+    public static bool ThrottleDownloads { get; set; } = true;
+
+    /// <summary>Caps download speed (<c>--limit-rate</c>) so the pull isn't a burst. null = omit.</summary>
+    public static string? DownloadLimitRate { get; set; } = "5M";
+
+    /// <summary>Re-extracts if speed drops below this (<c>--throttled-rate</c>), bypassing some
+    /// ISP/site throttling. null = omit.</summary>
+    public static string? DownloadThrottledRate { get; set; } = "100K";
+
+    /// <summary>Lower bound (seconds) for the random pre-download sleep (<c>--sleep-interval</c>).
+    /// null = omit both sleep args.</summary>
+    public static int? DownloadSleepIntervalSeconds { get; set; } = 2;
+
+    /// <summary>Upper bound (seconds) for the random pre-download sleep (<c>--max-sleep-interval</c>).</summary>
+    public static int? DownloadMaxSleepIntervalSeconds { get; set; } = 10;
+
+    // ── 403 back-off (mitigation 3) ──
+    // On repeated 403s for an item, stop re-attempting its download for a cooldown so we don't
+    // worsen the throttle. Keyed by videoId; shared across engine instances (settings changes
+    // rebuild the engine, but the throttle state should persist).
+
+    /// <summary>Number of consecutive 403 failures for an item before its download is put on
+    /// cooldown. null/less-than-1 disables the back-off.</summary>
+    public static int? Http403BackoffThreshold { get; set; } = 2;
+
+    /// <summary>How long an item's download stays on cooldown after tripping the 403 threshold.</summary>
+    public static TimeSpan Http403BackoffCooldown { get; set; } = TimeSpan.FromMinutes(10);
+
+    private static readonly object _backoffGate = new();
+    private static readonly Dictionary<string, int> _http403Counts = new();
+    private static readonly Dictionary<string, DateTimeOffset> _http403CooldownUntil = new();
+
     public YtDlpVideoEngine(string? ytDlpPath = null, PluginLog? log = null)
     {
         _ytDlpPath = ytDlpPath ?? ResolveYtDlpPath();
         _log = log;
+        // Populate the tunable throttle knobs from the bundled download_throttle.json (once).
+        DownloadThrottleConfig.EnsureLoaded(log);
     }
 
     /// <summary>Available only when the yt-dlp executable is present.</summary>
@@ -119,22 +163,34 @@ public sealed class YtDlpVideoEngine : IVideoEngine
     {
         var url = ToWatchUrl(videoId);
 
+        // 403 back-off: if this item recently tripped the 403 threshold, skip the download entirely
+        // for the cooldown window rather than hammering YouTube and worsening the throttle.
+        if (IsInHttp403Cooldown(videoId, out var remaining))
+        {
+            _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine",
+                $"skip download {videoId}: YouTube throttled (403 back-off, {remaining.TotalSeconds:F0}s remaining)");
+            return null;
+        }
+
         // Download best video-only and best audio-only streams separately, mirroring the
         // YoutubeExplode engine's output shape so the caches mux exactly as before.
         var videoFormat = $"bv*{HeightCap(quality)}";
         var audioFormat = preferStereo ? "ba[audio_channels<=2]/ba" : "ba";
 
-        var videoPath = await DownloadOneAsync(url, videoFormat,
+        var videoPath = await DownloadOneAsync(videoId, url, videoFormat,
             Path.Combine(destinationDir, "%(id)s_video.%(ext)s"), ct);
         if (videoPath == null) return null;
 
-        var audioPath = await DownloadOneAsync(url, audioFormat,
+        var audioPath = await DownloadOneAsync(videoId, url, audioFormat,
             Path.Combine(destinationDir, "%(id)s_audio.%(ext)s"), ct);
         if (audioPath == null)
         {
             TryDelete(videoPath);
             return null;
         }
+
+        // A successful download clears any accumulated 403 state for this item.
+        ClearHttp403(videoId);
 
         var resolution = await GetResolutionAsync(url, videoFormat, ct);
 
@@ -191,26 +247,122 @@ public sealed class YtDlpVideoEngine : IVideoEngine
         }
     }
 
+    // ── download throttling / 403 back-off ──
+
+    /// <summary>
+    /// Appends the code-tunable throttle args (<c>--limit-rate</c> / <c>--throttled-rate</c> /
+    /// <c>--sleep-interval</c> / <c>--max-sleep-interval</c>) to a DOWNLOAD invocation when
+    /// <see cref="ThrottleDownloads"/> is on. Never used on the resolve path.
+    /// </summary>
+    private static void AddThrottleArgs(List<string> args)
+    {
+        if (!ThrottleDownloads) return;
+
+        if (!string.IsNullOrWhiteSpace(DownloadLimitRate))
+        {
+            args.Add("--limit-rate");
+            args.Add(DownloadLimitRate);
+        }
+        if (!string.IsNullOrWhiteSpace(DownloadThrottledRate))
+        {
+            args.Add("--throttled-rate");
+            args.Add(DownloadThrottledRate);
+        }
+        if (DownloadSleepIntervalSeconds is int sleep && sleep > 0)
+        {
+            args.Add("--sleep-interval");
+            args.Add(sleep.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+            if (DownloadMaxSleepIntervalSeconds is int maxSleep && maxSleep >= sleep)
+            {
+                args.Add("--max-sleep-interval");
+                args.Add(maxSleep.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+    }
+
+    /// <summary>Heuristic: does this yt-dlp stderr indicate an HTTP 403 (throttling)?</summary>
+    private static bool LooksLikeHttp403(string? stderr)
+        => stderr != null
+            && (stderr.Contains("403", StringComparison.Ordinal)
+                || stderr.Contains("Forbidden", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Records a 403 for an item; once the threshold is reached, starts the cooldown.</summary>
+    private void RecordHttp403(string videoId)
+    {
+        if (Http403BackoffThreshold is not int threshold || threshold < 1) return;
+
+        lock (_backoffGate)
+        {
+            var count = _http403Counts.TryGetValue(videoId, out var c) ? c + 1 : 1;
+            _http403Counts[videoId] = count;
+
+            if (count >= threshold)
+            {
+                _http403CooldownUntil[videoId] = DateTimeOffset.UtcNow + Http403BackoffCooldown;
+                _http403Counts.Remove(videoId);
+                _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine",
+                    $"YouTube throttled {videoId}: {threshold} consecutive 403s — backing off downloads for {Http403BackoffCooldown.TotalMinutes:F0}m");
+            }
+        }
+    }
+
+    /// <summary>True while an item is in its 403 cooldown window; yields the remaining time.</summary>
+    private static bool IsInHttp403Cooldown(string videoId, out TimeSpan remaining)
+    {
+        remaining = TimeSpan.Zero;
+        lock (_backoffGate)
+        {
+            if (!_http403CooldownUntil.TryGetValue(videoId, out var until)) return false;
+
+            var now = DateTimeOffset.UtcNow;
+            if (now >= until)
+            {
+                _http403CooldownUntil.Remove(videoId);
+                return false;
+            }
+            remaining = until - now;
+            return true;
+        }
+    }
+
+    /// <summary>Clears any accumulated 403 count / cooldown for an item (on a successful download).</summary>
+    private static void ClearHttp403(string videoId)
+    {
+        lock (_backoffGate)
+        {
+            _http403Counts.Remove(videoId);
+            _http403CooldownUntil.Remove(videoId);
+        }
+    }
+
     // ── yt-dlp invocations ──
 
     /// <summary>
     /// Downloads a single selected format and returns the exact final file path
     /// (<c>--print after_move:filepath</c>), or null on failure.
     /// </summary>
-    private async Task<string?> DownloadOneAsync(string url, string format, string outputTemplate, CancellationToken ct)
+    private async Task<string?> DownloadOneAsync(string videoId, string url, string format, string outputTemplate, CancellationToken ct)
     {
-        var (exitCode, stdout, stderr) = await RunDownloadAsync(new[]
+        var args = new List<string>
         {
             "--no-warnings",
             "-f", format,
             "-o", outputTemplate,
             "--print", "after_move:filepath",
             "--no-simulate",
-            url,
-        }, ct);
+        };
+        AddThrottleArgs(args);
+        args.Add(url);
+
+        var (exitCode, stdout, stderr) = await RunDownloadAsync(args, ct);
 
         if (exitCode != 0)
         {
+            // Track 403s per item so repeated throttling puts the download on cooldown (mitigation 3).
+            if (LooksLikeHttp403(stderr))
+                RecordHttp403(videoId);
+
             _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine", $"download failed ({exitCode}) fmt={format}: {Trim(stderr)}");
             return null;
         }

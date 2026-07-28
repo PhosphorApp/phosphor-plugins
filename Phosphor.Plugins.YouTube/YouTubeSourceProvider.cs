@@ -16,6 +16,7 @@ public sealed class YouTubeSourceProvider : IPhosphorSourceProvider
     public const string KeyVideoEngine = "videoEngine";
     public const string KeyVideoQuality = "videoQuality";
     public const string KeyPreferStereo = "preferStereo";
+    public const string KeyThrottleDownloads = "throttleDownloads";
 
     /// <summary>Settings key holding the JSON-serialized user category list (tiles). Owned by the
     /// plug-in; seeded from the bundled <c>default_categories.json</c> on first run.</summary>
@@ -56,6 +57,8 @@ public sealed class YouTubeSourceProvider : IPhosphorSourceProvider
         },
         new(KeyPreferStereo, "Prefer stereo audio", PluginSettingType.Bool, DefaultValue: "true",
             HelpText: "Avoid surround tracks in favor of stereo."),
+        new(KeyThrottleDownloads, "Throttle downloads", PluginSettingType.Bool, DefaultValue: "true",
+            HelpText: "Slow yt-dlp cache/prefetch downloads to avoid YouTube 403 throttling (yt-dlp video engine only). Fine-tuning lives in download_throttle.json next to the plug-in."),
     ];
 
     public IPhosphorSource CreateInstance(string instanceId, IReadOnlyDictionary<string, string?> settings)

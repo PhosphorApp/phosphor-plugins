@@ -1,0 +1,11 @@
+{
+  "// note": "Code-tunable knobs for the yt-dlp DOWNLOAD path (cache/prefetch), used to stay polite and avoid YouTube 403 throttling. Edit and restart Phosphor to apply — no recompile needed. The on/off master switch lives in the YouTube plug-in Settings ('Throttle downloads'); these values only take effect when it is on. Set any value to null to omit its yt-dlp arg.",
+
+  "limitRate": "5M",
+  "throttledRate": "100K",
+  "sleepIntervalSeconds": 10,
+  "maxSleepIntervalSeconds": 20,
+
+  "http403BackoffThreshold": 2,
+  "http403BackoffCooldownMinutes": 10
+}
