@@ -435,8 +435,10 @@ public sealed class JellyfinClient
         if (!haveChosen)
             throw new InvalidOperationException("Jellyfin did not provide a playable Live TV stream (no TranscodingUrl).");
 
-        var transcodingUrl = Str(chosen, "TranscodingUrl");
+        var transcodingUrl = Str(chosen, "TranscodingUrl") ?? "";
         var liveStreamId = Str(chosen, "LiveStreamId");
+        if (string.IsNullOrEmpty(transcodingUrl))
+            throw new InvalidOperationException("Jellyfin did not provide a playable Live TV stream (no TranscodingUrl).");
         // TranscodingUrl is server-relative; make it absolute.
         var streamUrl = transcodingUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase)
             ? transcodingUrl
