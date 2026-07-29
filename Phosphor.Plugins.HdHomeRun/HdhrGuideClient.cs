@@ -12,7 +12,7 @@ namespace Phosphor.Plugins.HdHomeRun;
 /// <remarks>
 /// The guide service returns, per channel, an <c>ImageURL</c> (the channel icon) and a <c>Guide</c>
 /// array of upcoming programs (start/end unix time + title). SiliconDust gives every owner ~2 days of
-/// program data — more than we need. We fetch it best-effort, cache it (icons + programs) for ~24h,
+/// program data — more than we need. We fetch it best-effort, cache it (icons + programs) for ~4h,
 /// and compute the <em>current</em> program at display time (see <see cref="HdhrGuide.CurrentProgram"/>).
 /// The exact JSON shape is only lightly documented, so parsing is deliberately tolerant: any missing
 /// field simply yields less enrichment, never an error.
@@ -118,7 +118,7 @@ internal sealed record HdhrProgram(
 
 /// <summary>
 /// The cloud-guide data for one channel: its icon plus an ordered (by start time) list of programs.
-/// Programs are cached for ~24h; the <em>current</em> one is computed on demand against the clock.
+/// Programs are cached for ~4h; the <em>current</em> one is computed on demand against the clock.
 /// </summary>
 internal sealed record HdhrGuide(
     string GuideNumber,

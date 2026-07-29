@@ -30,18 +30,19 @@ public sealed class HdHomeRunSource :
 
     private const string GuideCacheFileName = "guide.json";
     private const int GuideCacheSchemaVersion = 1;
-    // Guide/program data is treated as a long-lived cache item — icons rarely change and ~24h of
-    // program data is more than enough to always show the current program.
-    private static readonly TimeSpan GuideMaxAge = TimeSpan.FromHours(24);
+    // Guide/program data cache. Kept fairly short (~4h) to stay well inside the source's program
+    // window: if the feed only supplies a few hours of schedule, a longer cache would leave us
+    // showing (or falling back from) stale/empty program data.
+    private static readonly TimeSpan GuideMaxAge = TimeSpan.FromHours(4);
 
     private readonly object _gate = new();
     private HdhrCatalog? _catalog;
     private DateTimeOffset? _catalogSavedUtc;
 
     // The cloud guide (channel icons + program schedule) keyed by guide number. Cached separately from
-    // the lineup with its own, longer (~24h) freshness window: icons/programs change slowly and a
-    // lineup rescan should not discard the guide. Used to enrich channel titles with the current
-    // program (see ToItem) and to overlay icons onto the lineup.
+    // the lineup with its own (~4h) freshness window: a lineup rescan should not discard the guide,
+    // and a shorter window keeps program data from going stale. Used to enrich channel titles with the
+    // current program (see ToItem) and to overlay icons onto the lineup.
     private readonly object _guideGate = new();
     private IReadOnlyDictionary<string, HdhrGuide> _guideByNumber =
         new Dictionary<string, HdhrGuide>(StringComparer.Ordinal);
@@ -178,12 +179,12 @@ public sealed class HdHomeRunSource :
         return new HdhrCatalog(catalog.Device, merged);
     }
 
-    // ── Guide (icons + programs) acquisition (lazy, 24h cache) ────────────────────
+    // ── Guide (icons + programs) acquisition (lazy, ~4h cache) ────────────────────
 
     /// <summary>
     /// Ensures the cloud guide is available: returns the in-memory copy if present, else loads a fresh
     /// on-disk cache, else (when enabled and a DeviceAuth token is available) fetches it from the
-    /// SiliconDust guide service and caches it for ~24h. Best-effort — any failure yields whatever we
+    /// SiliconDust guide service and caches it for ~4h. Best-effort — any failure yields whatever we
     /// already have (possibly empty), never an exception, so the local lineup is never blocked.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, HdhrGuide>> EnsureGuideAsync(
@@ -222,6 +223,19 @@ public sealed class HdHomeRunSource :
         if (fetched.Count == 0)
         {
             // Keep whatever we already had rather than clobbering a good cache with an empty fetch.
+            lock (_guideGate) return _guideByNumber;
+        }
+
+        // Dynamic eviction: when the source's program window is short, a fetch can return channels
+        // with (almost) no program data. Rather than caching that emptiness for the full freshness
+        // window, invalidate the cache so we re-fetch soon and pick up data as it becomes available.
+        var channelsWithPrograms = fetched.Values.Count(g => g.Programs.Count > 0);
+        if (channelsWithPrograms == 0)
+        {
+            _host?.Log(LogLevel.Info,
+                $"HDHomeRun: guide cache invalidated — fetch returned no program data for any of {fetched.Count} channels " +
+                "(source program window may be short); will re-fetch on next request.");
+            InvalidateGuideCache();
             lock (_guideGate) return _guideByNumber;
         }
 
@@ -374,6 +388,29 @@ public sealed class HdHomeRunSource :
         catch (Exception ex)
         {
             _host?.Log(LogLevel.Warning, $"HDHomeRun: guide cache write failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Drops the guide cache (in-memory + on-disk) so the next request re-fetches. Used when a fetch
+    /// comes back with no usable program data, to keep the cache dynamic rather than caching emptiness.
+    /// </summary>
+    private void InvalidateGuideCache()
+    {
+        lock (_guideGate)
+        {
+            _guideByNumber = new Dictionary<string, HdhrGuide>(StringComparer.Ordinal);
+            _guideSavedUtc = null;
+        }
+
+        try
+        {
+            var path = GuideCachePath;
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (Exception ex)
+        {
+            _host?.Log(LogLevel.Warning, $"HDHomeRun: guide cache delete failed: {ex.Message}");
         }
     }
 
