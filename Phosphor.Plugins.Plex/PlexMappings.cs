@@ -45,6 +45,10 @@ internal static class PlexMappings
             // Leaves keep the whole source VideoItem so resolve/metadata need no re-fetch; containers
             // carry a PlexNode (above) so the host can drill into them.
             SourceState = state,
+            // Durable identity the host persists (queue.json) and hands back on later round-trips — the
+            // rating key is all GetMetadataAsync needs to fetch on-demand chapters after a restart, when
+            // the live SourceState object is gone. Leaves only (containers rebuild from their PlexNode).
+            SourceStateToken = isContainer ? null : v.PlexRatingKey,
         };
     }
 

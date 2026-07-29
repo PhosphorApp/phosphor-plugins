@@ -457,11 +457,17 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
 
     public async Task<SourceMetadata?> GetMetadataAsync(SourceItem item, CancellationToken ct = default)
     {
-        var v = PlexMappings.VideoItemOf(item);
-        if (v == null) return null;
+        // Recover the live plug-in VideoItem for in-session items; for items restored from queue.json the
+        // SourceState object is gone, so fall back to a minimal item rebuilt from the durable rating key
+        // the host persisted in SourceStateToken.
+        var v = PlexMappings.VideoItemOf(item)
+                ?? (string.IsNullOrEmpty(item.SourceStateToken)
+                        ? null
+                        : new VideoItem { PlexRatingKey = item.SourceStateToken });
+        if (v == null || string.IsNullOrEmpty(v.PlexRatingKey)) return null;
 
         // Fetch chapters on demand when the item didn't already carry them.
-        if ((v.Chapters == null || v.Chapters.Count == 0) && !string.IsNullOrEmpty(v.PlexRatingKey))
+        if (v.Chapters == null || v.Chapters.Count == 0)
         {
             var chapters = await _plex.GetChaptersAsync(v.PlexRatingKey);
             if (chapters != null) v.Chapters = chapters;
