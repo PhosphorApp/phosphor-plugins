@@ -458,12 +458,14 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
     public async Task<SourceMetadata?> GetMetadataAsync(SourceItem item, CancellationToken ct = default)
     {
         var v = PlexMappings.VideoItemOf(item);
+        _host?.Log(LogLevel.Debug, $"PlexChapters: GetMetadataAsync sourceStateType={item.SourceState?.GetType().Name ?? "null"} recovered={(v == null ? "null" : "ok")} ratingKey={v?.PlexRatingKey ?? "null"} existingChapters={v?.Chapters?.Count.ToString() ?? "null"}");
         if (v == null) return null;
 
         // Fetch chapters on demand when the item didn't already carry them.
         if ((v.Chapters == null || v.Chapters.Count == 0) && !string.IsNullOrEmpty(v.PlexRatingKey))
         {
             var chapters = await _plex.GetChaptersAsync(v.PlexRatingKey);
+            _host?.Log(LogLevel.Debug, $"PlexChapters: GetChaptersAsync({v.PlexRatingKey}) -> {chapters?.Count.ToString() ?? "null"}");
             if (chapters != null) v.Chapters = chapters;
         }
 
