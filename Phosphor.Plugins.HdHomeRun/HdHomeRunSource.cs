@@ -248,6 +248,73 @@ public sealed class HdHomeRunSource :
         }
     }
 
+    /// <summary>
+    /// Keeps the cloud guide ("what's on") fresh independently of the channel lineup ("what channels
+    /// exist"). The lineup rarely changes and is cached for long periods, but the guide only carries a
+    /// few hours of schedule, so its ~4h freshness must be re-evaluated on its own cadence rather than
+    /// only when the catalog is rebuilt. Best-effort: any failure leaves the existing guide in place.
+    /// </summary>
+    /// <remarks>
+    /// Refreshes when the guide is missing, older than <see cref="GuideMaxAge"/>, or (failsafe) no
+    /// longer covers "now" for any channel — i.e. its program window has been exhausted. A refetch
+    /// needs a current <c>DeviceAuth</c> (it rotates ~daily), so we read it fresh from discovery rather
+    /// than trusting the long-lived catalog cache.
+    /// </remarks>
+    private async Task EnsureGuideFreshAsync(CancellationToken ct)
+    {
+        if (!_enableGuideData || _guide is null || _api is null || string.IsNullOrWhiteSpace(_tunerAddress))
+            return;
+
+        // Fast path: the in-memory guide is fresh AND still covers "now" for at least one channel.
+        lock (_guideGate)
+        {
+            if (_guideByNumber.Count > 0 && _guideSavedUtc is { } saved &&
+                DateTimeOffset.UtcNow - saved <= GuideMaxAge &&
+                HasAnyCurrentProgram(_guideByNumber))
+                return;
+        }
+
+        // Next: a fresh on-disk cache (just after startup, or one copied in) that still covers "now" —
+        // adopt it without any network call.
+        if (TryLoadGuideCache(out var cachedGuide, out var cachedSaved) &&
+            DateTimeOffset.UtcNow - cachedSaved <= GuideMaxAge &&
+            HasAnyCurrentProgram(cachedGuide))
+        {
+            lock (_guideGate)
+            {
+                _guideByNumber = cachedGuide;
+                _guideSavedUtc = cachedSaved;
+            }
+            return;
+        }
+
+        // Stale / expired / exhausted: refetch. Read a current DeviceAuth from discovery first.
+        try
+        {
+            var device = await _api.DiscoverAsync(_tunerAddress, ct).ConfigureAwait(false);
+            if (device is null || string.IsNullOrWhiteSpace(device.DeviceAuth))
+            {
+                _host?.Log(LogLevel.Warning, "HDHomeRun: guide refresh skipped — discovery returned no DeviceAuth.");
+                return;
+            }
+            await EnsureGuideAsync(device.DeviceAuth, forceRefresh: true, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _host?.Log(LogLevel.Warning, $"HDHomeRun: guide refresh failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>True when at least one channel in <paramref name="guide"/> has a program airing now.</summary>
+    private static bool HasAnyCurrentProgram(IReadOnlyDictionary<string, HdhrGuide> guide)
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var g in guide.Values)
+            if (g.CurrentProgram(now) is not null)
+                return true;
+        return false;
+    }
+
     /// <summary>The current program for a channel from the loaded guide, or <c>null</c>.</summary>
     private HdhrProgram? CurrentProgramFor(string guideNumber)
     {
@@ -441,6 +508,10 @@ public sealed class HdHomeRunSource :
     {
         var catalog = await EnsureCatalogAsync(ct).ConfigureAwait(false);
 
+        // The lineup may be served from the long-lived cache; keep the guide ("what's on") fresh on its
+        // own cadence so channel titles reflect the current program.
+        await EnsureGuideFreshAsync(ct).ConfigureAwait(false);
+
         if (category.CategoryId == RootFavorites)
         {
             var favIds = GetFavoriteIds();
@@ -482,6 +553,9 @@ public sealed class HdHomeRunSource :
     {
         if (string.IsNullOrWhiteSpace(query)) yield break;
         var catalog = await EnsureCatalogAsync(ct).ConfigureAwait(false);
+
+        // Keep the guide fresh independently of the (long-lived) lineup so result titles show what's on.
+        await EnsureGuideFreshAsync(ct).ConfigureAwait(false);
 
         foreach (var ch in catalog.Channels)
         {
