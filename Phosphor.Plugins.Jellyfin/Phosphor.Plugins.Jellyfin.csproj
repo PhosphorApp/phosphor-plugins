@@ -37,25 +37,4 @@
 	</ProjectReference>
   </ItemGroup>
 
-  <!--
-	Self-deploy: copy this plug-in's output into the host's plugins/Jellyfin/ folder whenever THIS
-	project builds. This inverts the dependency (the plug-in deploys itself instead of relying on the
-	host's AfterBuild copy), so a plain Build of the plug-in always refreshes the deployed DLL — no
-	more stale-plugin surprises when the host is "up to date". The shared contract is excluded (the
-	host owns the single runtime copy). Runs unconditionally so incremental builds can't skip it.
-  -->
-  <Target Name="SelfDeployToHost" AfterTargets="Build">
-	<PropertyGroup>
-	  <HostPluginDest>$(MSBuildThisFileDirectory)..\Phosphor\bin\$(Configuration)\net8.0-windows\plugins\Jellyfin</HostPluginDest>
-	</PropertyGroup>
-	<ItemGroup>
-	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
-	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
-	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
-	</ItemGroup>
-	<MakeDir Directories="$(HostPluginDest)" />
-	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
-	<Message Importance="high" Text="Jellyfin plug-in self-deployed to $(HostPluginDest)" />
-  </Target>
-
 </Project>

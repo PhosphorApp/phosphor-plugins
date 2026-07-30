@@ -23,7 +23,7 @@ internal sealed record ScFavorite(
 /// is deferred (IDeferredStreamResolution) since each yt-dlp probe is expensive.
 /// </summary>
 public sealed class SoundCloudSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver,
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver,
     IDeferredStreamResolution, IFavoritable, IConnectionTestable, IPlaybackReportable
 {
     // Curated genre feeds. SoundCloud has no keyless catalog API, so each is a canned scsearch term.
@@ -145,6 +145,19 @@ public sealed class SoundCloudSource :
             ScNodeKind.Genre => await BrowseGenreAsync(node.Query, ct),
             _ => new BrowseResult(),
         };
+    }
+
+    // ── IContainerPlayPolicy ─────────────────────────────────────────────────────
+
+    // The Root and each curated genre feed are grouping nodes: browse-only, so the host hides the play
+    // affordance rather than playing one arbitrary track from a large feed. The Favorites node stays
+    // playable — a small, user-curated set worth queueing whole. Individual tracks are playable leaves,
+    // not containers, so they're unaffected.
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container)
+    {
+        var kind = (container.SourceState as ScNode)?.Kind
+            ?? ((container.ItemId ?? "") == "favorites" ? ScNodeKind.Favorites : ScNodeKind.Genre);
+        return kind == ScNodeKind.Favorites ? ContainerPlayAll.QueueAll : ContainerPlayAll.None;
     }
 
     private BrowseResult BrowseRoot()

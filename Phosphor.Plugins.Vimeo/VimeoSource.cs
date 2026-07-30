@@ -24,7 +24,7 @@ internal sealed record VimeoFavorite(string Id, string Title, string Url, double
 /// (IDeferredStreamResolution) because each yt-dlp probe is expensive; the host resolves at play time.
 /// </summary>
 public sealed class VimeoSource :
-    IPhosphorSource, IBrowsable, IPagedBrowsable, ITextSearchCapable, IPlayableResolver,
+    IPhosphorSource, IBrowsable, IPagedBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver,
     IDeferredStreamResolution, IFavoritable, IConnectionTestable
 {
     private static readonly HttpClient SharedHttpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
@@ -153,6 +153,19 @@ public sealed class VimeoSource :
             default:
                 return new BrowseResult();
         }
+    }
+
+    // ── IContainerPlayPolicy ─────────────────────────────────────────────────────
+
+    // The Root and each editorial category/curated channel are grouping nodes: browse-only, so the
+    // host hides the play affordance rather than playing one arbitrary video from a large feed. The
+    // Favorites node stays playable — it's a small, user-curated set worth queueing whole. Individual
+    // videos are playable leaves, not containers, so they're unaffected.
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container)
+    {
+        var kind = (container.SourceState as VimeoNode)?.Kind
+            ?? ((container.ItemId ?? "") == "favorites" ? VimeoNodeKind.Favorites : VimeoNodeKind.Category);
+        return kind == VimeoNodeKind.Favorites ? ContainerPlayAll.QueueAll : ContainerPlayAll.None;
     }
 
     // ── IPagedBrowsable ──────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ internal sealed record DmFavorite(string Id, string Title, string Url, double? D
 /// (IDeferredStreamResolution) since each yt-dlp probe is expensive.
 /// </summary>
 public sealed class DailymotionSource :
-    IPhosphorSource, IBrowsable, IPagedBrowsable, ITextSearchCapable, IPlayableResolver,
+    IPhosphorSource, IBrowsable, IPagedBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver,
     IDeferredStreamResolution, IFavoritable, IConnectionTestable
 {
     private static readonly HttpClient SharedHttpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
@@ -139,6 +139,19 @@ public sealed class DailymotionSource :
             default:
                 return new BrowseResult();
         }
+    }
+
+    // ── IContainerPlayPolicy ─────────────────────────────────────────────────────
+
+    // The Root and each editorial category are grouping nodes: browse-only, so the host hides the play
+    // affordance rather than playing one arbitrary video from a large feed. The Favorites node stays
+    // playable — a small, user-curated set worth queueing whole. Individual videos are playable leaves,
+    // not containers, so they're unaffected.
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container)
+    {
+        var kind = (container.SourceState as DmNode)?.Kind
+            ?? ((container.ItemId ?? "") == "favorites" ? DmNodeKind.Favorites : DmNodeKind.Category);
+        return kind == DmNodeKind.Favorites ? ContainerPlayAll.QueueAll : ContainerPlayAll.None;
     }
 
     public async Task<BrowsePage> BrowsePageAsync(

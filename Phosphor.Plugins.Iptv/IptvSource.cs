@@ -14,7 +14,7 @@ namespace Phosphor.Plugins.Iptv;
 /// lazily on first use (or by an explicit "Rescan"), cached on disk, and guarded by a lock.
 /// </remarks>
 public sealed class IptvSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IRefreshable,
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver, IRefreshable,
     IFavoritable, IFavoriteCapture, IReplayableById, IHideable, IPlaybackReportable, IPlaybackSuccessReportable
 {
     // Durable category-id scheme (see SourceCategory.CategoryId): a node must be actionable from its
@@ -317,6 +317,22 @@ public sealed class IptvSource :
         }
 
         return new BrowseResult();
+    }
+
+    // ── IContainerPlayPolicy ─────────────────────────────────────────────────────
+
+    // Every browse grouping here — the "By Country"/"By Category" folders and each individual country
+    // or category — is a collection of UNRELATED live streams, not a curated set: "Play all" would
+    // just queue a grab-bag. So they're browse-only and the host hides the play affordance. (The
+    // Favorites node stays playable — it's a user-curated set. Individual channels are playable leaves,
+    // not containers, so they're unaffected.)
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container)
+    {
+        var id = container.ItemId ?? "";
+        bool grouping = id is Root or RootCountry or RootCategory
+            || id.StartsWith(CountryPrefix, StringComparison.Ordinal)
+            || id.StartsWith(CategoryPrefix, StringComparison.Ordinal);
+        return grouping ? ContainerPlayAll.None : ContainerPlayAll.QueueAll;
     }
 
     private static string FlagFor(IGrouping<string, IptvChannel> g)

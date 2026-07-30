@@ -49,28 +49,10 @@
 	<Content Include="download_throttle.json">
 	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 	</Content>
+	<!-- Also deploy these bundled json files alongside the plug-in (shared Directory.Build.targets
+		 copies PhosphorPluginExtraDeployFiles into plugins/YouTube/). -->
+	<PhosphorPluginExtraDeployFiles Include="$(TargetDir)default_categories.json" Condition="Exists('$(TargetDir)default_categories.json')" />
+	<PhosphorPluginExtraDeployFiles Include="$(TargetDir)download_throttle.json" Condition="Exists('$(TargetDir)download_throttle.json')" />
   </ItemGroup>
-
-  <!--
-	Self-deploy: copy this plug-in's output into the host's plugins/YouTube/ folder whenever THIS
-	project builds, so a plain Build always refreshes the deployed DLLs (no stale-plugin surprises).
-	The shared contract is excluded (the host owns the single runtime copy). Runs unconditionally so
-	incremental builds can't skip it. Mirrors the Vimeo/Jellyfin plug-ins.
-  -->
-  <Target Name="SelfDeployToHost" AfterTargets="Build">
-	<PropertyGroup>
-	  <HostPluginDest>$(MSBuildThisFileDirectory)..\Phosphor\bin\$(Configuration)\net8.0-windows\plugins\YouTube</HostPluginDest>
-	</PropertyGroup>
-	<ItemGroup>
-	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
-	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
-	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
-	  <SelfDeployFiles Include="$(TargetDir)default_categories.json" Condition="Exists('$(TargetDir)default_categories.json')" />
-	  <SelfDeployFiles Include="$(TargetDir)download_throttle.json" Condition="Exists('$(TargetDir)download_throttle.json')" />
-	</ItemGroup>
-	<MakeDir Directories="$(HostPluginDest)" />
-	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
-	<Message Importance="high" Text="YouTube plug-in self-deployed to $(HostPluginDest)" />
-  </Target>
 
 </Project>

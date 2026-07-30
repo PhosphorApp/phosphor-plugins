@@ -30,19 +30,4 @@
 	</ProjectReference>
   </ItemGroup>
 
-  <!-- Self-deploy into the host's plugins/Twitch/ folder on build (mirrors Dailymotion/Vimeo). -->
-  <Target Name="SelfDeployToHost" AfterTargets="Build">
-	<PropertyGroup>
-	  <HostPluginDest>$(MSBuildThisFileDirectory)..\Phosphor\bin\$(Configuration)\net8.0-windows\plugins\Twitch</HostPluginDest>
-	</PropertyGroup>
-	<ItemGroup>
-	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
-	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
-	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
-	</ItemGroup>
-	<MakeDir Directories="$(HostPluginDest)" />
-	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
-	<Message Importance="high" Text="Twitch plug-in self-deployed to $(HostPluginDest)" />
-  </Target>
-
 </Project>

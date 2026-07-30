@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.SiriusXM;
 /// suppresses seek/duration and never auto-advances.
 /// </remarks>
 public sealed class SiriusXmSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable, IRefreshable, IDisposable
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable, IRefreshable, IDisposable
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
@@ -247,6 +247,15 @@ public sealed class SiriusXmSource :
         var s when s.StartsWith("cat:", StringComparison.Ordinal) => new SxmNode(SxmNodeKind.Category, s["cat:".Length..]),
         _ => new SxmNode(SxmNodeKind.Root),
     };
+
+    // ── IContainerPlayPolicy ─────────────────────────────────────────────────────
+
+    // EVERY container here is a grouping node — the root, a super-group (Music/Talk/Sports), a
+    // category, All Channels, and even Favorites — because they all contain continuous LIVE stations
+    // (indefinite, non-curated). "Play all" is meaningless for a live-station collection, so they're
+    // all browse-only and the host hides the play affordance. Only an individual station (a playable
+    // leaf, not a container) plays.
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container) => ContainerPlayAll.None;
 
     private static string SuperGroupIcon(string super) => super switch
     {

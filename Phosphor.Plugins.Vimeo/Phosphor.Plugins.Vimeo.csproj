@@ -36,24 +36,4 @@
 	</ProjectReference>
   </ItemGroup>
 
-  <!--
-	Self-deploy: copy this plug-in's output into the host's plugins/Vimeo/ folder whenever THIS
-	project builds, so a plain Build always refreshes the deployed DLL (no stale-plugin surprises).
-	The shared contract is excluded (the host owns the single runtime copy). Runs unconditionally so
-	incremental builds can't skip it. Mirrors the Jellyfin/SiriusXM plug-ins.
-  -->
-  <Target Name="SelfDeployToHost" AfterTargets="Build">
-	<PropertyGroup>
-	  <HostPluginDest>$(MSBuildThisFileDirectory)..\Phosphor\bin\$(Configuration)\net8.0-windows\plugins\Vimeo</HostPluginDest>
-	</PropertyGroup>
-	<ItemGroup>
-	  <SelfDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
-	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
-	  <SelfDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
-	</ItemGroup>
-	<MakeDir Directories="$(HostPluginDest)" />
-	<Copy SourceFiles="@(SelfDeployFiles)" DestinationFolder="$(HostPluginDest)" SkipUnchangedFiles="false" />
-	<Message Importance="high" Text="Vimeo plug-in self-deployed to $(HostPluginDest)" />
-  </Target>
-
 </Project>
