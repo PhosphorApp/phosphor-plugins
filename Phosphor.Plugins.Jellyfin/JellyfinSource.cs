@@ -36,6 +36,7 @@ public sealed class JellyfinSource :
     private string _username = "";
     private string _password = "";
     private bool _stereoAudio;
+    private bool _singleTile;
     private List<string> _selectedLibraryIds = [];
 
     // Ids of the server's Live TV view(s), captured during GetRootCategoriesAsync so BrowseAsync can
@@ -90,6 +91,13 @@ public sealed class JellyfinSource :
 
         _selectedLibraryIds = ParseLibraryIds(Get(values, JellyfinSourceProvider.KeyLibraries));
 
+        // Tile mode: default (unset/unknown) is the historical "Per Library" behavior; only an
+        // explicit "Single Tile" collapses the libraries under one root tile.
+        _singleTile = string.Equals(
+            Get(values, JellyfinSourceProvider.KeyTileMode),
+            JellyfinSourceProvider.TileModeSingleTile,
+            StringComparison.OrdinalIgnoreCase);
+
         // Force a fresh client with the new config on the next use.
         _client?.Configure(_serverUrl, _username, _password, _stereoAudio);
     }
@@ -133,6 +141,42 @@ public sealed class JellyfinSource :
         EnsureClient();
         if (_client is null) yield break;
 
+        // Single Tile mode: one root tile for the whole server; the libraries become its children
+        // (produced by browsing the ServerRoot sentinel). Default (Per Library) yields one root per
+        // library. Note we still enumerate libraries in Single Tile mode's BrowseAsync so the Live TV
+        // view ids get captured there.
+        if (_singleTile)
+        {
+            yield return new SourceCategory
+            {
+                SourceInstanceId = InstanceId,
+                CategoryId = ServerRootId,
+                Title = DisplayName,
+                Icon = "📚",
+                HasSubCategories = true,
+                SourceState = new JellyfinState(ServerRootId, IsAudioOnly: false),
+            };
+            yield break;
+        }
+
+        await foreach (var cat in FetchLibraryRootCategoriesAsync(ct))
+            yield return cat;
+    }
+
+    /// <summary>Sentinel category id / item id marking the Single Tile server-root node.</summary>
+    private const string ServerRootId = "__server_root__";
+
+    /// <summary>
+    /// Fetches the server's libraries (honoring the selected-library filter) as root
+    /// <see cref="SourceCategory"/> tiles, capturing Live TV view ids as a side effect. Shared by both
+    /// tile modes: emitted directly as home-screen tiles in Per Library mode, or nested under the
+    /// single server tile in Single Tile mode.
+    /// </summary>
+    private async IAsyncEnumerable<SourceCategory> FetchLibraryRootCategoriesAsync(
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        if (_client is null) yield break;
+
         IReadOnlyList<JellyfinItem> views;
         try
         {
@@ -174,6 +218,17 @@ public sealed class JellyfinSource :
     {
         EnsureClient();
         if (_client is null) return new BrowseResult();
+
+        // Single Tile server root: expand to the libraries (the same tiles Per Library mode surfaces
+        // at the top level).
+        if (category.CategoryId == ServerRootId ||
+            (category.SourceState as JellyfinState)?.ItemId == ServerRootId)
+        {
+            var libs = new List<SourceCategory>();
+            await foreach (var cat in FetchLibraryRootCategoriesAsync(ct))
+                libs.Add(cat);
+            return new BrowseResult { Categories = libs };
+        }
 
         var parentId = (category.SourceState as JellyfinState)?.ItemId ?? category.CategoryId;
 

@@ -25,6 +25,7 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
     private string _serverUrl = "";
     private string _token = "";
     private bool _stereoAudio;
+    private bool _singleTile;
     private List<PlexLibraryMapping> _libraries = [];
 
     // Channels the host reported as failed to play (all tuners busy, brief outage). Not hidden — the
@@ -71,6 +72,13 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
         // mechanical/ball exciters, not music). Matches the Emby/Jellyfin sources.
         _stereoAudio = !bool.TryParse(Get(values, PlexSourceProvider.KeyStereoAudio), out var s) || s;
         _libraries = ParseLibraries(Get(values, PlexSourceProvider.KeyLibraries));
+
+        // Tile mode: default (unset/unknown) is the historical "Per Library" behavior; only an
+        // explicit "Single Tile" collapses the libraries under one root tile.
+        _singleTile = string.Equals(
+            Get(values, PlexSourceProvider.KeyTileMode),
+            PlexSourceProvider.TileModeSingleTile,
+            StringComparison.OrdinalIgnoreCase);
 
         _plex.Configure(_serverUrl, _token, _stereoAudio);
         _liveTv.Configure(_serverUrl, _token);
@@ -195,6 +203,34 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         await Task.CompletedTask;
+
+        // Single Tile mode: one root tile for the whole server; the libraries become its children
+        // (produced by BrowseServerRoot). Default (Per Library) yields one root per library.
+        if (_singleTile)
+        {
+            yield return new SourceCategory
+            {
+                SourceInstanceId = InstanceId,
+                CategoryId = "server",
+                Title = DisplayName,
+                Icon = "📚",
+                HasSubCategories = true,
+                SourceState = new PlexNode(PlexNodeKind.ServerRoot, ""),
+            };
+            yield break;
+        }
+
+        foreach (var cat in BuildLibraryRootCategories())
+            yield return cat;
+    }
+
+    /// <summary>
+    /// Builds one root <see cref="SourceCategory"/> per configured library (Live TV libraries use the
+    /// dedicated Live TV mapping). Shared by both tile modes: emitted directly as home-screen tiles in
+    /// Per Library mode, or nested under the single server tile in Single Tile mode.
+    /// </summary>
+    private IEnumerable<SourceCategory> BuildLibraryRootCategories()
+    {
         foreach (var lib in _libraries)
         {
             if (PlexSourceProvider.IsLiveTvType(lib.Type))
@@ -213,6 +249,7 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
 
         return node.Kind switch
         {
+            PlexNodeKind.ServerRoot => BrowseServerRoot(),
             PlexNodeKind.Library => await BrowseLibraryAsync(node, ct),
             PlexNodeKind.LiveTv => await BrowseLiveTvAsync(node, ct),
             PlexNodeKind.Artist => await BrowseChildrenAsync(node, PlexItemType.Album, PlexNodeKind.Album, ct),
@@ -276,6 +313,11 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
 
         return null;
     }
+
+    /// <summary>Expands the Single Tile server root into the configured libraries (and Live TV) as
+    /// sub-categories — the same nodes Per Library mode surfaces as top-level tiles.</summary>
+    private BrowseResult BrowseServerRoot() =>
+        new() { Categories = BuildLibraryRootCategories().ToList() };
 
     private async Task<BrowseResult> BrowseLibraryAsync(PlexNode node, CancellationToken ct)
     {

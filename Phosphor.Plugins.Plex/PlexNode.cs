@@ -8,6 +8,9 @@ namespace Phosphor.Plugins.Plex;
 /// </summary>
 internal enum PlexNodeKind
 {
+    /// <summary>The whole server as a single root tile (Single Tile mode) — expands to the
+    /// configured libraries (and Live TV) as sub-categories. <see cref="PlexNode.Key"/> is unused.</summary>
+    ServerRoot,
     /// <summary>A library section (music "artist" type, or video). Root-level tile.</summary>
     Library,
     /// <summary>An artist — expands to its albums.</summary>

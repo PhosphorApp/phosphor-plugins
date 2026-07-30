@@ -48,6 +48,7 @@ public sealed class EmbySource :
     private string _username = "";
     private string _password = "";
     private bool _stereoAudio;
+    private bool _singleTile;
     private List<string> _selectedLibraryIds = [];
 
     public EmbySource(string instanceId, IReadOnlyDictionary<string, string?> settings)
@@ -87,6 +88,13 @@ public sealed class EmbySource :
         // Default to stereo when unset/invalid — safest for cabs.
 
         _selectedLibraryIds = ParseLibraryIds(Get(values, EmbySourceProvider.KeyLibraries));
+
+        // Tile mode: default (unset/unknown) is the historical "Per Library" behavior; only an
+        // explicit "Single Tile" collapses the libraries under one root tile.
+        _singleTile = string.Equals(
+            Get(values, EmbySourceProvider.KeyTileMode),
+            EmbySourceProvider.TileModeSingleTile,
+            StringComparison.OrdinalIgnoreCase);
 
         // Force a fresh client with the new config on the next use.
         _client?.Configure(_serverUrl, _username, _password, _stereoAudio);
@@ -131,6 +139,40 @@ public sealed class EmbySource :
         EnsureClient();
         if (_client is null) yield break;
 
+        // Single Tile mode: one root tile for the whole server; the libraries become its children
+        // (produced by browsing the ServerRoot sentinel). Default (Per Library) yields one root per
+        // library. The sentinel avoids a network round-trip during the home-screen fetch.
+        if (_singleTile)
+        {
+            yield return new SourceCategory
+            {
+                SourceInstanceId = InstanceId,
+                CategoryId = ServerRootId,
+                Title = DisplayName,
+                Icon = "📚",
+                HasSubCategories = true,
+                SourceState = new EmbyState(ServerRootId, IsAudioOnly: false),
+            };
+            yield break;
+        }
+
+        await foreach (var cat in FetchLibraryRootCategoriesAsync(ct))
+            yield return cat;
+    }
+
+    /// <summary>Sentinel category id / item id marking the Single Tile server-root node.</summary>
+    private const string ServerRootId = "__server_root__";
+
+    /// <summary>
+    /// Fetches the server's libraries (honoring the selected-library filter) as root
+    /// <see cref="SourceCategory"/> tiles. Shared by both tile modes: emitted directly as home-screen
+    /// tiles in Per Library mode, or nested under the single server tile in Single Tile mode.
+    /// </summary>
+    private async IAsyncEnumerable<SourceCategory> FetchLibraryRootCategoriesAsync(
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        if (_client is null) yield break;
+
         IReadOnlyList<EmbyItem> views;
         try
         {
@@ -173,6 +215,17 @@ public sealed class EmbySource :
     {
         EnsureClient();
         if (_client is null) return new BrowseResult();
+
+        // Single Tile server root: expand to the libraries (the same tiles Per Library mode surfaces
+        // at the top level).
+        var rootState = category.SourceState as EmbyState;
+        if (category.CategoryId == ServerRootId || rootState?.ItemId == ServerRootId)
+        {
+            var libs = new List<SourceCategory>();
+            await foreach (var cat in FetchLibraryRootCategoriesAsync(ct))
+                libs.Add(cat);
+            return new BrowseResult { Categories = libs };
+        }
 
         var state = category.SourceState as EmbyState;
         var parentId = state?.ItemId ?? category.CategoryId;

@@ -16,6 +16,11 @@ public sealed class PlexSourceProvider : IPhosphorSourceProvider
     public const string KeyToken = "token";
     public const string KeyStereoAudio = "stereoAudio";
     public const string KeyLibraries = "libraries";
+    public const string KeyTileMode = "tileMode";
+
+    /// <summary>Tile-mode enum values (persisted verbatim as the setting's string value).</summary>
+    public const string TileModePerLibrary = "Per Library";
+    public const string TileModeSingleTile = "Single Tile";
 
     public const string ActionBrowseLibraries = "browseLibraries";
 
@@ -47,6 +52,13 @@ public sealed class PlexSourceProvider : IPhosphorSourceProvider
         new(KeyStereoAudio, "Prefer stereo audio", PluginSettingType.Bool, DefaultValue: "true",
             HelpText: "Downmix/transcode surround tracks to stereo. Imperative on pinball cabs, " +
                       "whose surround channels drive mechanical/ball exciters, not music."),
+        new(KeyTileMode, "Tile mode", PluginSettingType.Enum, DefaultValue: TileModePerLibrary,
+            HelpText: "Per Library: each configured library (and Live TV) is its own home-screen " +
+                      "tile. Single Tile: one Plex tile that opens to the list of libraries — handy " +
+                      "when you have many.")
+        {
+            EnumValues = [TileModePerLibrary, TileModeSingleTile],
+        },
         // The library-tile selection is populated via the "Browse libraries" action and
         // stored as an opaque JSON blob; not directly user-editable as a text field.
         new(KeyLibraries, "Libraries", PluginSettingType.Text,

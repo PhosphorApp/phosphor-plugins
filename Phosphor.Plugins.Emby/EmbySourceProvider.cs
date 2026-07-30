@@ -33,6 +33,13 @@ public sealed class EmbySourceProvider : IPhosphorSourceProvider
     /// </summary>
     public const string KeyLibraries = "libraries";
 
+    /// <summary>Settings key: home-screen tile mode (see <see cref="TileModePerLibrary"/>).</summary>
+    public const string KeyTileMode = "tileMode";
+
+    /// <summary>Tile-mode enum values (persisted verbatim as the setting's string value).</summary>
+    public const string TileModePerLibrary = "Per Library";
+    public const string TileModeSingleTile = "Single Tile";
+
     /// <summary>Config action id for the interactive library chooser. Deliberately NOT the same
     /// string the Plex source uses ("browseLibraries") — the host suppresses source-specific ids in
     /// the generic config-action UI because those sources render an inline library editor.</summary>
@@ -63,6 +70,12 @@ public sealed class EmbySourceProvider : IPhosphorSourceProvider
         new(KeyStereoAudio, "Prefer stereo audio", PluginSettingType.Bool, DefaultValue: "true",
             HelpText: "Ask the server for a 2-channel downmix. Keep ON for pinball cabinets whose " +
                       "surround channels drive mechanical/ball exciters."),
+        new(KeyTileMode, "Tile mode", PluginSettingType.Enum, DefaultValue: TileModePerLibrary,
+            HelpText: "Per Library: each library is its own home-screen tile. Single Tile: one Emby " +
+                      "tile that opens to the list of libraries — handy when you have many.")
+        {
+            EnumValues = [TileModePerLibrary, TileModeSingleTile],
+        },
         // The library-tile selection is populated via the "Browse libraries" action and stored as an
         // opaque JSON blob; not directly user-editable as a text field.
         new(KeyLibraries, "Libraries", PluginSettingType.Text,
