@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.IHeartRadio;
 /// proxy — the public catalog is key-less and the HLS is unencrypted.
 /// </remarks>
 public sealed class IHeartRadioSource :
-    IPhosphorSource, IBrowsable, IPagedBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IFavoritable, IFavoriteCapture, IDisposable
+    IPhosphorSource, IBrowsable, IPagedBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver, IConnectionTestable, IFavoritable, IFavoriteCapture, IDisposable
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
@@ -321,6 +321,30 @@ public sealed class IHeartRadioSource :
         var genres = await Client.GetGenresAsync(ct);
         lock (_gate) _genres = genres;
         return genres;
+    }
+
+    // ── IContainerPlayPolicy ─────────────────────────────────────────────────────
+
+    // A PODCAST show is a recency feed: "Play all" plays only its most recent episode, never the whole
+    // back-catalog. Every OTHER container here is a pure grouping node whose children are distinct
+    // sources — the Root and Podcasts branches, a podcast category, and also a live-station genre or
+    // the Popular Stations list (a grab-bag of unrelated stations, not one artist's works). None of
+    // those have a meaningful "Play all", so the host renders them browse-only and hides the play
+    // affordance.
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container) =>
+        NodeKindOf(container) == IHeartNodeKind.Podcast
+            ? ContainerPlayAll.PlayLatestOnly
+            : ContainerPlayAll.None;
+
+    public string? PlayAllLabel(SourceItem container) =>
+        NodeKindOf(container) == IHeartNodeKind.Podcast ? "Play latest" : null;
+
+    // Resolves a container's node kind from its carried IHeartNode when present, else from its id
+    // shape (durable — survives a reconstructed item whose SourceState is null).
+    private static IHeartNodeKind NodeKindOf(SourceItem container)
+    {
+        if (container.SourceState is IHeartNode n) return n.Kind;
+        return InferNode(container.ItemId ?? "").Kind;
     }
 
     // ── ITextSearchCapable ──────────────────────────────────────────────────────

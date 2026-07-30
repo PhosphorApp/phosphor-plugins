@@ -304,11 +304,26 @@ public sealed class PodcastIndexSource :
 
     // ── IContainerPlayPolicy ─────────────────────────────────────────────────────
 
-    // A podcast feed is a recency feed, not a curated set: "Play all" should play only the most
-    // recent episode (episodes come back newest-first), never queue the entire back-catalog.
-    public ContainerPlayAll GetPlayAllBehavior(SourceItem container) => ContainerPlayAll.PlayLatestOnly;
+    // A podcast FEED is a recency feed: "Play all" plays only the most recent episode (episodes come
+    // back newest-first), never the whole back-catalog. A grouping node (a category/trending/favorites
+    // tile whose children are themselves shows) has NO meaningful "Play all" — it's browse-only, so
+    // the host hides the play affordance rather than playing one arbitrary episode from deep in it.
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container) =>
+        NodeKindOf(container) == PiNodeKind.Feed
+            ? ContainerPlayAll.PlayLatestOnly
+            : ContainerPlayAll.None;
 
-    public string? PlayAllLabel(SourceItem container) => "Play latest";
+    public string? PlayAllLabel(SourceItem container) =>
+        NodeKindOf(container) == PiNodeKind.Feed ? "Play latest" : null;
+
+    // Resolves a container's node kind from its carried PiNode when present, else from its id shape
+    // (durable — survives a reconstructed item whose SourceState is null).
+    private static PiNodeKind NodeKindOf(SourceItem container)
+    {
+        if (container.SourceState is PiNode n) return n.Kind;
+        var id = container.ItemId ?? "";
+        return id.StartsWith("feed:", StringComparison.Ordinal) ? PiNodeKind.Feed : PiNodeKind.Category;
+    }
 
     // ── Mapping ──────────────────────────────────────────────────────────────────
 

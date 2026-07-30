@@ -521,11 +521,26 @@ public sealed class TwitchSource :
         return live is not null ? ToSourceItem(live) : null;
     }
 
-    // A Twitch channel is a recency feed, not a curated set: "Play all" should play what's live now
-    // (or the most recent VOD), never queue the entire back-catalog.
-    public ContainerPlayAll GetPlayAllBehavior(SourceItem container) => ContainerPlayAll.PlayLatestOnly;
+    // A Twitch CHANNEL is a recency feed: "Play all" plays what's live now (or the most recent VOD),
+    // never the entire back-catalog. A game/category tile (or the Categories list) is a pure grouping
+    // whose children are themselves channels — it has NO meaningful "Play all", so it's browse-only
+    // and the host hides the play affordance rather than playing one arbitrary stream from within it.
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container) =>
+        IsGroupingNode(container) ? ContainerPlayAll.None : ContainerPlayAll.PlayLatestOnly;
 
-    public string? PlayAllLabel(SourceItem container) => "Play latest";
+    public string? PlayAllLabel(SourceItem container) =>
+        IsGroupingNode(container) ? null : "Play latest";
+
+    // A grouping node lists other containers (games → channels), not playable leaves: the Categories
+    // list tile and any single game/category tile. Resolved from the carried node when present, else
+    // the id shape (durable across a reconstructed item whose SourceState is null).
+    private static bool IsGroupingNode(SourceItem container)
+    {
+        if (container.SourceState is TwNode n)
+            return n.Kind is TwNodeKind.Categories or TwNodeKind.Category;
+        var id = container.ItemId ?? "";
+        return id == "categories" || id.StartsWith("cat:", StringComparison.Ordinal);
+    }
 
     // Maps a row's ItemId to its owning channel login: a live-stream row is already the login; a VOD
     // row is resolved via the channel we saw it under; a channel-VODs container id is "vods:{login}"
