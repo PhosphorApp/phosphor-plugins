@@ -17,7 +17,7 @@ namespace Phosphor.Plugins.PodcastIndex;
 /// Requires a per-user, free API key + secret, so every request is SHA-1 signed by the client.
 /// </remarks>
 public sealed class PodcastIndexSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IFavoritable, IFavoriteCapture, IDisposable
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IScopedSearchable, IContainerPlayPolicy, IPlayableResolver, IConnectionTestable, IFavoritable, IFavoriteCapture, IDisposable
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
@@ -267,6 +267,32 @@ public sealed class PodcastIndexSource :
             yield return ToFeedContainerItem(f);
         }
     }
+
+    // ── IScopedSearchable ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Re-runs a feed search so the host can push a durable "Search: …" frame: Back from a drilled-in
+    /// show returns to the search RESULTS (not the tile's default content), and the breadcrumb reads
+    /// honestly. The scope is source-wide (Podcast Index has no per-node search), so the node is
+    /// ignored and only the query matters — which makes it replayable from CategoryId alone.
+    /// </summary>
+    public async Task<BrowseResult> SearchInCategoryAsync(
+        SourceCategory node, string query, CancellationToken ct = default)
+    {
+        var q = query?.Trim() ?? "";
+        if (q.Length == 0) return new BrowseResult();
+
+        var feeds = await Client.SearchFeedsAsync(q, max: 50, ct);
+        return new BrowseResult { Categories = feeds.Select(ToFeedCategory).ToList() };
+    }
+
+    // ── IContainerPlayPolicy ─────────────────────────────────────────────────────
+
+    // A podcast feed is a recency feed, not a curated set: "Play all" should play only the most
+    // recent episode (episodes come back newest-first), never queue the entire back-catalog.
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container) => ContainerPlayAll.PlayLatestOnly;
+
+    public string? PlayAllLabel(SourceItem container) => "Play latest";
 
     // ── Mapping ──────────────────────────────────────────────────────────────────
 
