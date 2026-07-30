@@ -21,6 +21,7 @@ public sealed class PodcastIndexSource :
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
+    private string _authMode = PodcastIndexSourceProvider.AuthModePhosphor;
     private string _apiKey = "";
     private string _apiSecret = "";
 
@@ -43,7 +44,20 @@ public sealed class PodcastIndexSource :
     public string TypeId => PodcastIndexSourceProvider.PodcastIndexTypeId;
     public string DisplayName { get; set; } = "Podcast Index";
 
-    public bool IsConfigured => !string.IsNullOrWhiteSpace(_apiKey) && !string.IsNullOrWhiteSpace(_apiSecret);
+    // True when the user brings their own key (BYOK). In "Phosphor" mode we use the built-in
+    // credentials instead of the entered ones.
+    private bool IsByok =>
+        string.Equals(_authMode, PodcastIndexSourceProvider.AuthModeByok, StringComparison.OrdinalIgnoreCase);
+
+    // The credentials actually used to sign requests: the user's own in BYOK mode, else Phosphor's
+    // built-in (obfuscated) pair.
+    private string EffectiveApiKey => IsByok ? _apiKey : BuiltInCredentials.ApiKey;
+    private string EffectiveApiSecret => IsByok ? _apiSecret : BuiltInCredentials.ApiSecret;
+
+    // In "Phosphor" mode we always have working built-in credentials; in BYOK mode the user must have
+    // supplied both a key and a secret.
+    public bool IsConfigured => !IsByok ||
+        (!string.IsNullOrWhiteSpace(_apiKey) && !string.IsNullOrWhiteSpace(_apiSecret));
     public bool IsEnabled { get; set; } = true;
 
     public Task InitializeAsync(IPluginHost host, CancellationToken ct = default)
@@ -56,6 +70,8 @@ public sealed class PodcastIndexSource :
 
     private void ApplySettingsInternal(IReadOnlyDictionary<string, string?> values)
     {
+        _authMode = Get(values, PodcastIndexSourceProvider.KeyAuthMode)
+            is { Length: > 0 } mode ? mode : PodcastIndexSourceProvider.AuthModePhosphor;
         _apiKey = Get(values, PodcastIndexSourceProvider.KeyApiKey) ?? "";
         _apiSecret = Get(values, PodcastIndexSourceProvider.KeyApiSecret) ?? "";
 
@@ -78,7 +94,7 @@ public sealed class PodcastIndexSource :
             {
                 return _client ??= new PodcastIndexClient(
                     _host?.HttpClient ?? new HttpClient(),
-                    _apiKey, _apiSecret,
+                    EffectiveApiKey, EffectiveApiSecret,
                     s => Log(LogLevel.Debug, s));
             }
         }
@@ -89,7 +105,7 @@ public sealed class PodcastIndexSource :
     public async Task<ConnectionTestResult> TestConnectionAsync(CancellationToken ct = default)
     {
         if (!IsConfigured)
-            return new ConnectionTestResult(false, "Enter your Podcast Index API key and secret first.");
+            return new ConnectionTestResult(false, "Bring-your-own-key mode is selected — enter your Podcast Index API key and secret first.");
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
