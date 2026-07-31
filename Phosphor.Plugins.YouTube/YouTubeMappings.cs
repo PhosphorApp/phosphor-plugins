@@ -5,6 +5,13 @@ using PluginChapterMarker = Phosphor.Plugin.Abstractions.ChapterMarker;
 namespace Phosphor.Plugins.YouTube;
 
 /// <summary>
+/// Opaque browse/resolve state for a YouTube channel/playlist container <c>SourceItem</c>, carrying
+/// the parsed kind + raw id so the source expands the node without re-parsing. Recoverable from the
+/// namespaced <c>ItemId</c> alone (see <see cref="YouTubeMappings.TryParseContainerId"/>).
+/// </summary>
+internal sealed record YtContainerState(ChannelPlaylistKind Kind, string RawId);
+
+/// <summary>
 /// Adapts the host's existing YouTube engine types (<see cref="VideoItem"/>,
 /// <see cref="VideoStreams"/>, <see cref="VideoDownload"/>, <see cref="VideoMetadata"/>)
 /// to the plug-in abstraction types. This is pure, behavior-preserving translation — no
@@ -35,6 +42,71 @@ internal static class YouTubeMappings
     /// </summary>
     public static string VideoIdOf(SourceItem item) =>
         item.SourceState as string ?? item.ItemId;
+
+    // ── Containers (channels / playlists) ──────────────────────────────────────
+
+    /// <summary>Namespaced-id prefix marking a channel container (vs. an 11-char video id).</summary>
+    public const string ChannelPrefix = "channel:";
+
+    /// <summary>Namespaced-id prefix marking a playlist container.</summary>
+    public const string PlaylistPrefix = "playlist:";
+
+    /// <summary>The namespaced container id (e.g. <c>channel:UC…</c>) for a channel/playlist.</summary>
+    public static string ContainerItemId(ChannelPlaylistKind kind, string rawId) =>
+        (kind == ChannelPlaylistKind.Channel ? ChannelPrefix : PlaylistPrefix) + rawId;
+
+    /// <summary>
+    /// Converts a channel id to its "uploads" playlist id (<c>UC…</c> → <c>UU…</c>), which both search
+    /// engines can enumerate as a playlist. YouTube channel ids always start with <c>UC</c>; the
+    /// uploads playlist swaps that prefix for <c>UU</c>. Ids not matching that shape are returned
+    /// unchanged (best effort).
+    /// </summary>
+    public static string ChannelUploadsPlaylistId(string channelId) =>
+        channelId.StartsWith("UC", StringComparison.Ordinal)
+            ? "UU" + channelId[2..]
+            : channelId;
+
+    /// <summary>
+    /// Parses a namespaced container id back into its kind + raw channel/playlist id. Returns false
+    /// for a plain video id. Works from the durable id alone (no SourceState needed), so the host can
+    /// replay a persisted favorite.
+    /// </summary>
+    public static bool TryParseContainerId(string id, out ChannelPlaylistKind kind, out string rawId)
+    {
+        if (!string.IsNullOrEmpty(id))
+        {
+            if (id.StartsWith(ChannelPrefix, StringComparison.Ordinal))
+            {
+                kind = ChannelPlaylistKind.Channel;
+                rawId = id[ChannelPrefix.Length..];
+                return true;
+            }
+            if (id.StartsWith(PlaylistPrefix, StringComparison.Ordinal))
+            {
+                kind = ChannelPlaylistKind.Playlist;
+                rawId = id[PlaylistPrefix.Length..];
+                return true;
+            }
+        }
+        kind = default;
+        rawId = "";
+        return false;
+    }
+
+    /// <summary>Maps a channel/playlist discovery result to a browsable container <see cref="SourceItem"/>.</summary>
+    public static SourceItem ToContainerSourceItem(ChannelOrPlaylistItem c, string instanceId) => new()
+    {
+        SourceInstanceId = instanceId,
+        ItemId = ContainerItemId(c.Kind, c.Id),
+        Title = c.Title,
+        Subtitle = string.IsNullOrEmpty(c.Author)
+            ? (c.Kind == ChannelPlaylistKind.Channel ? "Channel" : "Playlist")
+            : c.Author,
+        ThumbnailUrl = c.ThumbnailUrl,
+        IsContainer = true,
+        // Carry the parsed identity so browse/resolve need no re-parse; also recoverable from ItemId.
+        SourceState = new YtContainerState(c.Kind, c.Id),
+    };
 
     // ── Playback / streams ─────────────────────────────────────────────────────
 

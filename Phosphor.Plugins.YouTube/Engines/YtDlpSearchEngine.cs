@@ -40,6 +40,53 @@ public sealed class YtDlpSearchEngine : ISearchEngine
     public IAsyncEnumerable<VideoItem> GetChannelUploadsAsync(string handleOrUser, CancellationToken ct = default)
         => EnumerateAsync(ToChannelVideosUrl(handleOrUser), ct);
 
+    public IAsyncEnumerable<ChannelOrPlaylistItem> SearchChannelsAsync(string query, CancellationToken ct = default)
+        // sp=EgIQAg scopes YouTube's results page to channels; flat-playlist entries are YoutubeTab urls.
+        => EnumerateContainersAsync(query, "EgIQAg", ChannelPlaylistKind.Channel, ct);
+
+    public IAsyncEnumerable<ChannelOrPlaylistItem> SearchPlaylistsAsync(string query, CancellationToken ct = default)
+        // sp=EgIQAw scopes YouTube's results page to playlists.
+        => EnumerateContainersAsync(query, "EgIQAw", ChannelPlaylistKind.Playlist, ct);
+
+    private async IAsyncEnumerable<ChannelOrPlaylistItem> EnumerateContainersAsync(
+        string query, string spFilter, ChannelPlaylistKind kind,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var searchUrl =
+            $"https://www.youtube.com/results?search_query={Uri.EscapeDataString(query)}&sp={spFilter}";
+        var args = new[] { "--no-warnings", "--flat-playlist", "--dump-json", searchUrl };
+
+        await foreach (var line in YtDlpVideoEngine.RunYtDlpStreamingAsync(_ytDlpPath, args, ct, _log))
+        {
+            ChannelOrPlaylistItem? item = null;
+            try
+            {
+                var dto = JsonSerializer.Deserialize<YtDlpEntryJson>(line);
+                // Only accept genuine channel/playlist entries (YoutubeTab), not stray video rows.
+                if (dto?.Id != null
+                    && string.Equals(dto.IeKey, "YoutubeTab", StringComparison.OrdinalIgnoreCase))
+                {
+                    item = new ChannelOrPlaylistItem
+                    {
+                        Id = dto.Id,
+                        Kind = kind,
+                        Title = dto.Title ?? "",
+                        Author = dto.Uploader ?? dto.Channel ?? "",
+                        ThumbnailUrl = BestThumbnail(dto.Thumbnails, dto.Id),
+                        ItemCount = dto.PlaylistCount,
+                    };
+                }
+            }
+            catch
+            {
+                // Skip malformed lines (progress noise, partial writes).
+            }
+
+            if (item != null)
+                yield return item;
+        }
+    }
+
     public async Task<string?> ResolvePlaylistIdAsync(
         string nameIdOrUrl,
         Action<string>? onFoundByName = null,
@@ -172,6 +219,7 @@ public sealed class YtDlpSearchEngine : ISearchEngine
         [JsonPropertyName("duration")] public double? Duration { get; set; }
         [JsonPropertyName("thumbnails")] public List<YtDlpThumbJson>? Thumbnails { get; set; }
         [JsonPropertyName("ie_key")] public string? IeKey { get; set; }
+        [JsonPropertyName("playlist_count")] public long? PlaylistCount { get; set; }
     }
 
     private sealed class YtDlpThumbJson

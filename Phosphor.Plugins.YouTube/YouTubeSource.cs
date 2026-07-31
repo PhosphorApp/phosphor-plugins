@@ -19,7 +19,7 @@ namespace Phosphor.Plugins.YouTube;
 /// YoutubeExplode package and existing engine code directly. It is a pure data producer:
 /// it never touches UI or assumes a thread.
 /// </remarks>
-public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable, ISearchHintProvider, ISavedSearchCategories, IEditableSavedSearchCategories, IResultCachePolicy
+public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlaylistChannelDiscovery, IPlayableResolver, IDownloadable, IUpdatable, IConnectionTestable, IFavoritable, IFavoriteCapture, IBrowsable, IPagedBrowsable, IContainerPlayPolicy, ISearchHintProvider, ISavedSearchCategories, IEditableSavedSearchCategories, IResultCachePolicy
 {
     private HttpClient? _http;
     private static readonly HttpClient _sharedHttp = new() { Timeout = TimeSpan.FromSeconds(15) };
@@ -66,7 +66,7 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     public bool IsConfigured => true;
 
     /// <summary>Search-box hint advertising YouTube's query grammar (see <see cref="ISearchHintProvider"/>).</summary>
-    public string? SearchHint => "...try channel:<name>, playlist:<name>, min:5m, max:30m";
+    public string? SearchHint => "...try channel:<name>, playlist:<name>, channels:<name>, playlists:<name>, min:5m, max:30m";
 
     public bool IsEnabled { get; set; } = true;
 
@@ -241,6 +241,118 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
             yield return YouTubeMappings.ToSourceItem(v, InstanceId);
     }
 
+    public async IAsyncEnumerable<SourceItem> SearchChannelsAsync(
+        string query, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await foreach (var c in _search.SearchChannelsAsync(query, ct).WithCancellation(ct))
+            yield return YouTubeMappings.ToContainerSourceItem(c, InstanceId);
+    }
+
+    public async IAsyncEnumerable<SourceItem> SearchPlaylistsAsync(
+        string query, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await foreach (var p in _search.SearchPlaylistsAsync(query, ct).WithCancellation(ct))
+            yield return YouTubeMappings.ToContainerSourceItem(p, InstanceId);
+    }
+
+    // ── IBrowsable ─────────────────────────────────────────────────────────────
+    // YouTube has no static browse tree of its own (no root categories → no stray "YouTube" browse
+    // tile). It implements IBrowsable ONLY so the host's generic drill-in machinery can expand a
+    // favorited/searched channel or playlist container node into its videos, reusing the same path
+    // every other container source uses.
+
+    public IAsyncEnumerable<SourceCategory> GetRootCategoriesAsync(CancellationToken ct = default)
+        => EmptyCategories();
+
+    private static async IAsyncEnumerable<SourceCategory> EmptyCategories()
+    {
+        await Task.CompletedTask;
+        yield break;
+    }
+
+    public Task<BrowseResult> BrowseAsync(SourceCategory category, CancellationToken ct = default)
+    {
+        // Channel/playlist videos are a large, flat list — return NO leaves here so the host drives
+        // lazy paging through IPagedBrowsable.BrowsePageAsync (below), instead of loading a 1000-video
+        // channel in one shot. A non-container node yields nothing.
+        return Task.FromResult(new BrowseResult());
+    }
+
+    // ── IPagedBrowsable ────────────────────────────────────────────────────────
+    // YouTube's engines enumerate uploads/playlists as a forward-only cursor stream, not by offset.
+    // To serve the host's offset-based paging we keep one live enumerator per browse node and pull
+    // the next `count` items each call, tracking how far we've advanced. A new node (or a rewind to
+    // offset 0) restarts the stream.
+
+    private sealed class PagedStream
+    {
+        public required string CategoryId { get; init; }
+        public required IAsyncEnumerator<VideoItem> Enumerator { get; init; }
+        public int Served { get; set; }
+        public bool Exhausted { get; set; }
+    }
+
+    private readonly object _pageGate = new();
+    private PagedStream? _pagedStream;
+
+    public async Task<BrowsePage> BrowsePageAsync(
+        SourceCategory category, int offset, int count, CancellationToken ct = default)
+    {
+        if (!YouTubeMappings.TryParseContainerId(category.CategoryId, out var kind, out var rawId))
+            return new BrowsePage();
+
+        PagedStream stream;
+        lock (_pageGate)
+        {
+            // Start (or restart) the cursor when the node changes or the host rewinds to the top.
+            if (_pagedStream is null || _pagedStream.CategoryId != category.CategoryId || offset == 0)
+            {
+                if (_pagedStream is not null)
+                    _ = _pagedStream.Enumerator.DisposeAsync().AsTask();
+
+                var playlistId = kind == ChannelPlaylistKind.Channel
+                    ? YouTubeMappings.ChannelUploadsPlaylistId(rawId)
+                    : rawId;
+                _pagedStream = new PagedStream
+                {
+                    CategoryId = category.CategoryId,
+                    Enumerator = _search.GetPlaylistVideosAsync(playlistId, ct).GetAsyncEnumerator(ct),
+                };
+            }
+            stream = _pagedStream;
+        }
+
+        var items = new List<SourceItem>();
+        // Skip any already-served items if the host asks for a window past where we are (defensive —
+        // the host pages sequentially, so normally Served == offset already).
+        while (stream.Served < offset && !stream.Exhausted)
+        {
+            if (!await stream.Enumerator.MoveNextAsync()) { stream.Exhausted = true; break; }
+            stream.Served++;
+        }
+
+        while (items.Count < count && !stream.Exhausted)
+        {
+            if (!await stream.Enumerator.MoveNextAsync()) { stream.Exhausted = true; break; }
+            items.Add(YouTubeMappings.ToSourceItem(stream.Enumerator.Current, InstanceId));
+            stream.Served++;
+        }
+
+        // TotalSize is unknown for a forward-only cursor: report "at least what we've served, plus one
+        // more page" while items keep coming, and the exact served count once exhausted. This keeps the
+        // host's "load more" affordance alive until the stream truly ends.
+        var total = stream.Exhausted ? stream.Served : stream.Served + count;
+        return new BrowsePage { Items = items, TotalSize = total };
+    }
+
+    // ── IContainerPlayPolicy ───────────────────────────────────────────────────
+    // A channel/playlist container is a drill-in shortcut, not a "queue all N uploads" action — the
+    // host hides the play-all affordance and offers browse only.
+    public ContainerPlayAll GetPlayAllBehavior(SourceItem container)
+        => YouTubeMappings.TryParseContainerId(container.ItemId, out _, out _)
+            ? ContainerPlayAll.None
+            : ContainerPlayAll.QueueAll;
+
     // ── IPlayableResolver ──────────────────────────────────────────────────────
 
     public async Task<ResolvedStream?> ResolveAsync(
@@ -335,12 +447,15 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
     private static bool ParseBool(IReadOnlyDictionary<string, string?> values, string key, bool fallback)
         => values.TryGetValue(key, out var raw) && bool.TryParse(raw, out var parsed) ? parsed : fallback;
 
-    // ── IFavoritable ───────────────────────────────────────────────────────────
-    // YouTube favorites are just video ids plus a light display record (so the aggregated tile and
-    // GetFavorite work without a network probe). They surface ONLY in the host-level global Favorites
-    // tile — YouTube has no stable browse tree to host a per-source Favorites node.
+    // ── IFavoritable / IFavoriteCapture ────────────────────────────────────────
+    // YouTube favorites are video ids OR namespaced channel/playlist container ids, plus a light
+    // display record (so the aggregated tile and GetFavorite work without a network probe). Videos
+    // surface in the host-level global Favorites tile; a favorited channel/playlist rebuilds as a
+    // browsable container that drills in via IBrowsable. YouTube has no stable per-source browse tree
+    // to host its own Favorites node.
 
-    private sealed record YtFavorite(string Id, string Title, string Author, string? ThumbnailUrl, double? DurationSeconds);
+    private sealed record YtFavorite(
+        string Id, string Title, string Author, string? ThumbnailUrl, double? DurationSeconds, bool IsContainer);
 
     private readonly object _favGate = new();
     private Dictionary<string, YtFavorite>? _favoritesCache;
@@ -363,9 +478,14 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
             if (favorite)
             {
                 changed = !Favorites.ContainsKey(itemId);
-                // A light placeholder; the host index carries the rich display data captured at
-                // star-time. Title/thumbnail here are best-effort and refined on next play.
-                Favorites[itemId] = new YtFavorite(itemId, $"YouTube {itemId}", "", null, null);
+                if (changed)
+                {
+                    // A light placeholder; RememberFavorite refines it with the rich display data the
+                    // host captured at star-time. A container id (channel:/playlist:) marks a drill-in.
+                    var isContainer = YouTubeMappings.TryParseContainerId(itemId, out _, out _);
+                    Favorites[itemId] = new YtFavorite(
+                        itemId, DefaultTitle(itemId), "", null, null, isContainer);
+                }
             }
             else
             {
@@ -375,24 +495,69 @@ public sealed class YouTubeSource : IPhosphorSource, ITextSearchCapable, IPlayli
         }
     }
 
+    public void RememberFavorite(FavoriteCapture item)
+    {
+        if (string.IsNullOrEmpty(item.ItemId)) return;
+        lock (_favGate)
+        {
+            if (!Favorites.ContainsKey(item.ItemId)) return;
+            Favorites[item.ItemId] = new YtFavorite(
+                item.ItemId,
+                string.IsNullOrEmpty(item.Title) ? DefaultTitle(item.ItemId) : item.Title,
+                item.Subtitle ?? "",
+                item.ThumbnailUrl,
+                item.Duration?.TotalSeconds,
+                item.IsContainer || YouTubeMappings.TryParseContainerId(item.ItemId, out _, out _));
+            SaveFavorites();
+        }
+    }
+
     public IReadOnlyCollection<string> GetFavoriteIds()
     {
         lock (_favGate) return Favorites.Keys.ToArray();
     }
 
-    /// <summary>Rebuilds a playable item from a favorited video id (resolve happens via yt-dlp at play time).</summary>
+    /// <summary>
+    /// Rebuilds a favorited item: a browsable container for a channel/playlist id (drills in via
+    /// <see cref="BrowseAsync"/>), or a playable video (resolved via yt-dlp at play time) otherwise.
+    /// Works from the durable id alone, so it survives a restart.
+    /// </summary>
     public SourceItem? GetFavorite(string itemId)
     {
         if (string.IsNullOrEmpty(itemId)) return null;
-        lock (_favGate) { if (!Favorites.ContainsKey(itemId)) return null; }
+        YtFavorite? f;
+        lock (_favGate) f = Favorites.TryGetValue(itemId, out var rec) ? rec : null;
+        if (f is null) return null;
+
+        if (YouTubeMappings.TryParseContainerId(itemId, out var kind, out var rawId))
+            return new SourceItem
+            {
+                SourceInstanceId = InstanceId,
+                ItemId = itemId,
+                Title = f.Title,
+                Subtitle = string.IsNullOrEmpty(f.Author) ? null : f.Author,
+                ThumbnailUrl = f.ThumbnailUrl,
+                IsContainer = true,
+                SourceState = new YtContainerState(kind, rawId),
+            };
+
         return new SourceItem
         {
             SourceInstanceId = InstanceId,
             ItemId = itemId,
-            Title = $"YouTube {itemId}",
+            Title = f.Title,
+            Subtitle = string.IsNullOrEmpty(f.Author) ? null : f.Author,
+            ThumbnailUrl = f.ThumbnailUrl,
+            Duration = f.DurationSeconds is { } s ? TimeSpan.FromSeconds(s) : null,
             SourceState = itemId,
         };
     }
+
+    /// <summary>Best-effort placeholder title until the host's rich star-time capture arrives.</summary>
+    private static string DefaultTitle(string itemId) =>
+        YouTubeMappings.TryParseContainerId(itemId, out var kind, out var rawId)
+            ? $"YouTube {(kind == ChannelPlaylistKind.Channel ? "channel" : "playlist")} {rawId}"
+            : $"YouTube {itemId}";
 
     private Dictionary<string, YtFavorite> LoadFavorites()
     {

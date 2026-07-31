@@ -48,6 +48,38 @@ public sealed class YoutubeExplodeSearchEngine : ISearchEngine
             yield return item;
     }
 
+    public async IAsyncEnumerable<ChannelOrPlaylistItem> SearchChannelsAsync(
+        string query, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await foreach (var c in _youtube.Search.GetChannelsAsync(query).WithCancellation(ct))
+        {
+            yield return new ChannelOrPlaylistItem
+            {
+                Id = c.Id,
+                Kind = ChannelPlaylistKind.Channel,
+                Title = c.Title ?? "",
+                Author = c.Title ?? "",
+                ThumbnailUrl = c.Thumbnails?.GetWithHighestResolution()?.Url ?? "",
+            };
+        }
+    }
+
+    public async IAsyncEnumerable<ChannelOrPlaylistItem> SearchPlaylistsAsync(
+        string query, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await foreach (var p in _youtube.Search.GetPlaylistsAsync(query).WithCancellation(ct))
+        {
+            yield return new ChannelOrPlaylistItem
+            {
+                Id = p.Id,
+                Kind = ChannelPlaylistKind.Playlist,
+                Title = p.Title ?? "",
+                Author = p.Author?.ChannelTitle ?? "",
+                ThumbnailUrl = p.Thumbnails?.GetWithHighestResolution()?.Url ?? "",
+            };
+        }
+    }
+
     public async Task<string?> ResolvePlaylistIdAsync(
         string nameIdOrUrl,
         Action<string>? onFoundByName = null,

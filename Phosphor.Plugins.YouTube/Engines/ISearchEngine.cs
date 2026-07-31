@@ -31,6 +31,18 @@ public interface ISearchEngine
     IAsyncEnumerable<VideoItem> GetChannelUploadsAsync(string handleOrUser, CancellationToken ct = default);
 
     /// <summary>
+    /// Incrementally yields <em>channels</em> matching a free-text query (browsable containers, not
+    /// videos). Backs the <c>channels:</c> search prefix so the user can find and favorite a channel.
+    /// </summary>
+    IAsyncEnumerable<ChannelOrPlaylistItem> SearchChannelsAsync(string query, CancellationToken ct = default);
+
+    /// <summary>
+    /// Incrementally yields <em>playlists</em> matching a free-text query (browsable containers, not
+    /// videos). Backs playlist-row discovery so the user can find and favorite a playlist.
+    /// </summary>
+    IAsyncEnumerable<ChannelOrPlaylistItem> SearchPlaylistsAsync(string query, CancellationToken ct = default);
+
+    /// <summary>
     /// Resolves a playlist id from a raw id, URL, or a name to search for. Returns the
     /// canonical playlist id, or <c>null</c> if a name search found nothing.
     /// </summary>
