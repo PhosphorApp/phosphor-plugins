@@ -1,0 +1,16 @@
+<Solution>
+  <Project Path="Phosphor.Plugins.Dailymotion/Phosphor.Plugins.Dailymotion.csproj" />
+  <Project Path="Phosphor.Plugins.Emby/Phosphor.Plugins.Emby.csproj" />
+  <Project Path="Phosphor.Plugins.HdHomeRun/Phosphor.Plugins.HdHomeRun.csproj" />
+  <Project Path="Phosphor.Plugins.IHeartRadio/Phosphor.Plugins.IHeartRadio.csproj" />
+  <Project Path="Phosphor.Plugins.Iptv/Phosphor.Plugins.Iptv.csproj" />
+  <Project Path="Phosphor.Plugins.Jellyfin/Phosphor.Plugins.Jellyfin.csproj" />
+  <Project Path="Phosphor.Plugins.LocalFolder/Phosphor.Plugins.LocalFolder.csproj" />
+  <Project Path="Phosphor.Plugins.Plex/Phosphor.Plugins.Plex.csproj" />
+  <Project Path="Phosphor.Plugins.PodcastIndex/Phosphor.Plugins.PodcastIndex.csproj" />
+  <Project Path="Phosphor.Plugins.SiriusXM/Phosphor.Plugins.SiriusXM.csproj" />
+  <Project Path="Phosphor.Plugins.SoundCloud/Phosphor.Plugins.SoundCloud.csproj" />
+  <Project Path="Phosphor.Plugins.Twitch/Phosphor.Plugins.Twitch.csproj" />
+  <Project Path="Phosphor.Plugins.Vimeo/Phosphor.Plugins.Vimeo.csproj" />
+  <Project Path="Phosphor.Plugins.YouTube/Phosphor.Plugins.YouTube.csproj" />
+</Solution>
