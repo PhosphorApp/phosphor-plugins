@@ -54,3 +54,6 @@ LICENSE.draft.txt
 # (the real sources live at Phosphor/Caching/PrefetchCache.cs and Phosphor/Emoji/EmojiRenderer.cs)
 Phosphor/Services/PrefetchCache.cs
 Phosphor/Visuals/EmojiRenderer.cs
+
+# Plugin self-deploy output (PHOSPHOR_HOST_DIR unset)
+dist/

@@ -1,0 +1,50 @@
+<Project>
+
+  <!--
+	Shared plug-in deployment for the standalone phosphor-plugins repo (auto-imported into every
+	Phosphor.Plugins.* project via MSBuild's Directory.Build.targets discovery).
+
+	Each plug-in self-deploys its output into <deploy-root>/plugins/<Name>/, where <Name> is the
+	project name minus the "Phosphor.Plugins." prefix (e.g. Phosphor.Plugins.Iptv -> plugins/Iptv).
+
+	DEPLOY ROOT RESOLUTION (this is what changed when plug-ins moved to their own repo — there is no
+	longer a sibling ..\Phosphor\bin host tree):
+	  * If the PHOSPHOR_HOST_DIR environment variable is set, deploy into $(PHOSPHOR_HOST_DIR)/plugins/<Name>.
+		Point it at a built host output (e.g. E:\phosphor\Phosphor\bin\Debug\net8.0-windows) so an
+		F5 of the host picks up freshly built plug-ins — the dev inner loop.
+	  * Otherwise deploy into a repo-local dist/plugins/<Name>, so a plain `dotnet build` still produces
+		the canonical plugins/<Name>/ layout (used by CI to assemble drop-in artifacts and the snapshot).
+
+	The host-owned shared contract (Phosphor.Plugin.Abstractions.dll) is excluded so the single runtime
+	copy lives with the host, never duplicated across the load boundary. The plug-in's own .deps.json is
+	included: the loader's AssemblyDependencyResolver reads it to locate private dependencies.
+
+	Incremental correctness: Inputs/Outputs let MSBuild's up-to-date check skip the copy when nothing
+	changed. SkipUnchangedFiles is false so that, once the target runs, it always overwrites (a plug-in
+	DLL keeps its version, so a timestamp-only change would otherwise be skipped).
+  -->
+  <PropertyGroup Condition="$(MSBuildProjectName.StartsWith('Phosphor.Plugins.'))">
+	<PhosphorPluginName>$(MSBuildProjectName.Substring(17))</PhosphorPluginName>
+	<PhosphorDeployRoot Condition="'$(PHOSPHOR_HOST_DIR)' != ''">$(PHOSPHOR_HOST_DIR)</PhosphorDeployRoot>
+	<PhosphorDeployRoot Condition="'$(PHOSPHOR_HOST_DIR)' == ''">$(MSBuildThisFileDirectory)dist</PhosphorDeployRoot>
+	<PhosphorPluginDeployDir>$(PhosphorDeployRoot)\plugins\$(PhosphorPluginName)</PhosphorPluginDeployDir>
+  </PropertyGroup>
+
+  <Target Name="SelfDeployPluginToHost"
+		  AfterTargets="Build"
+		  Condition="$(MSBuildProjectName.StartsWith('Phosphor.Plugins.'))"
+		  Inputs="$(TargetPath)"
+		  Outputs="$(PhosphorPluginDeployDir)\$(AssemblyName).dll">
+	<ItemGroup>
+	  <PhosphorPluginDeployFiles Include="$(TargetDir)*.dll" Exclude="$(TargetDir)Phosphor.Plugin.Abstractions.dll" />
+	  <PhosphorPluginDeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+	  <PhosphorPluginDeployFiles Include="$(TargetDir)$(AssemblyName).deps.json" Condition="Exists('$(TargetDir)$(AssemblyName).deps.json')" />
+	  <!-- Any plug-in-specific extra content (e.g. a bundled json map) a project opts to deploy. -->
+	  <PhosphorPluginDeployFiles Include="@(PhosphorPluginExtraDeployFiles)" />
+	</ItemGroup>
+	<MakeDir Directories="$(PhosphorPluginDeployDir)" />
+	<Copy SourceFiles="@(PhosphorPluginDeployFiles)" DestinationFolder="$(PhosphorPluginDeployDir)" SkipUnchangedFiles="false" />
+	<Message Importance="high" Text="Deployed $(PhosphorPluginName) plug-in to $(PhosphorPluginDeployDir)" />
+  </Target>
+
+</Project>
