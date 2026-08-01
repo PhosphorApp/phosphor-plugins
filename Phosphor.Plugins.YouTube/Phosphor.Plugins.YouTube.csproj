@@ -50,9 +50,12 @@
 	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 	</Content>
 	<!-- Also deploy these bundled json files alongside the plug-in (shared Directory.Build.targets
-		 copies PhosphorPluginExtraDeployFiles into plugins/YouTube/). -->
-	<PhosphorPluginExtraDeployFiles Include="$(TargetDir)default_categories.json" Condition="Exists('$(TargetDir)default_categories.json')" />
-	<PhosphorPluginExtraDeployFiles Include="$(TargetDir)download_throttle.json" Condition="Exists('$(TargetDir)download_throttle.json')" />
+		 copies PhosphorPluginExtraDeployFiles into plugins/YouTube/). Reference the SOURCE files
+		 (which always exist), not $(TargetDir)/Exists(...): those are resolved at static-evaluation
+		 time — before Build populates $(TargetDir) — so on a clean build the condition is false and
+		 the json files silently never deploy. -->
+	<PhosphorPluginExtraDeployFiles Include="$(MSBuildProjectDirectory)\default_categories.json" />
+	<PhosphorPluginExtraDeployFiles Include="$(MSBuildProjectDirectory)\download_throttle.json" />
   </ItemGroup>
 
 </Project>

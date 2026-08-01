@@ -42,8 +42,11 @@
 	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 	</None>
 	<!-- Also deploy the bundled map alongside the plug-in (shared Directory.Build.targets copies
-		 PhosphorPluginExtraDeployFiles into plugins/SiriusXM/). -->
-	<PhosphorPluginExtraDeployFiles Include="$(TargetDir)categories.json" Condition="Exists('$(TargetDir)categories.json')" />
+		 PhosphorPluginExtraDeployFiles into plugins/SiriusXM/). Reference the SOURCE file (which
+		 always exists), not $(TargetDir)/Exists(...): those resolve at static-evaluation time —
+		 before Build populates $(TargetDir) — so on a clean build the condition is false and the
+		 json silently never deploys. -->
+	<PhosphorPluginExtraDeployFiles Include="$(MSBuildProjectDirectory)\categories.json" />
   </ItemGroup>
 
 </Project>

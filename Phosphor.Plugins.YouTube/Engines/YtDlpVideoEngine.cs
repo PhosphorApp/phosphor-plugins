@@ -62,6 +62,67 @@ public sealed class YtDlpVideoEngine : IVideoEngine
     private static readonly Dictionary<string, int> _http403Counts = new();
     private static readonly Dictionary<string, DateTimeOffset> _http403CooldownUntil = new();
 
+    // ── Per-item resolve/download serialization (mitigation 4) ──
+    // YouTube 403-throttles a concurrent live STREAM RESOLVE and full-media DOWNLOAD of the SAME
+    // item — which is exactly what happens when an item is playing (resolve, on ProcessGate) while
+    // it is simultaneously being cached (download, on the separate DownloadGate). Those two gates
+    // are deliberately independent (a long download must not stall interactive playback), so they
+    // don't protect against the same-id overlap. This per-videoId gate closes that specific hole:
+    // the same id is never resolved and downloaded at once, while DIFFERENT ids stay unaffected.
+
+    private static readonly object _perIdGateMapLock = new();
+    private static readonly Dictionary<string, (SemaphoreSlim gate, int refCount)> _perIdGates = new();
+
+    /// <summary>
+    /// Acquires the per-videoId gate, runs <paramref name="body"/>, then releases and prunes the
+    /// gate. Serializes resolve vs. download (and resolve vs. resolve / download vs. download) for
+    /// the SAME id only; other ids proceed independently. The gate entry is ref-counted so it is
+    /// removed once no operation holds it, keeping the map from growing unbounded.
+    /// </summary>
+    private static async Task<T> WithPerIdGateAsync<T>(string videoId, Func<Task<T>> body, CancellationToken ct)
+    {
+        SemaphoreSlim gate;
+        lock (_perIdGateMapLock)
+        {
+            if (_perIdGates.TryGetValue(videoId, out var entry))
+            {
+                gate = entry.gate;
+                _perIdGates[videoId] = (gate, entry.refCount + 1);
+            }
+            else
+            {
+                gate = new SemaphoreSlim(1, 1);
+                _perIdGates[videoId] = (gate, 1);
+            }
+        }
+
+        try
+        {
+            await gate.WaitAsync(ct);
+            try
+            {
+                return await body();
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+        finally
+        {
+            lock (_perIdGateMapLock)
+            {
+                if (_perIdGates.TryGetValue(videoId, out var entry))
+                {
+                    if (entry.refCount <= 1)
+                        _perIdGates.Remove(videoId);
+                    else
+                        _perIdGates[videoId] = (entry.gate, entry.refCount - 1);
+                }
+            }
+        }
+    }
+
     public YtDlpVideoEngine(string? ytDlpPath = null, PluginLog? log = null)
     {
         _ytDlpPath = ytDlpPath ?? ResolveYtDlpPath();
@@ -89,12 +150,23 @@ public sealed class YtDlpVideoEngine : IVideoEngine
     /// playable URL(s): two lines for separate video+audio, one for a muxed fallback.
     /// URLs are time-limited and IP-bound, so this is resolved fresh for each play.
     /// </summary>
-    public async Task<VideoStreams?> ResolveStreamsAsync(
+    public Task<VideoStreams?> ResolveStreamsAsync(
         string videoId,
         VideoQualityPreference quality,
         bool preferStereo,
         bool audioOnly,
         CancellationToken ct = default)
+        // Serialize against a concurrent DOWNLOAD of the same id (and other resolves of it) so we
+        // don't trip YouTube's same-item stream+download 403 throttle. Different ids are unaffected.
+        => WithPerIdGateAsync(videoId,
+            () => ResolveStreamsCoreAsync(videoId, quality, preferStereo, audioOnly, ct), ct);
+
+    private async Task<VideoStreams?> ResolveStreamsCoreAsync(
+        string videoId,
+        VideoQualityPreference quality,
+        bool preferStereo,
+        bool audioOnly,
+        CancellationToken ct)
     {
         var url = ToWatchUrl(videoId);
         var cap = HeightCap(quality);
@@ -154,12 +226,23 @@ public sealed class YtDlpVideoEngine : IVideoEngine
         return new VideoStreams(VideoStreamKind.Muxed, lines[1], null, resolution);
     }
 
-    public async Task<VideoDownload?> DownloadStreamsAsync(
+    public Task<VideoDownload?> DownloadStreamsAsync(
         string videoId,
         VideoQualityPreference quality,
         bool preferStereo,
         string destinationDir,
         CancellationToken ct = default)
+        // Serialize against a concurrent RESOLVE of the same id (and other downloads of it) so we
+        // don't trip YouTube's same-item stream+download 403 throttle. Different ids are unaffected.
+        => WithPerIdGateAsync(videoId,
+            () => DownloadStreamsCoreAsync(videoId, quality, preferStereo, destinationDir, ct), ct);
+
+    private async Task<VideoDownload?> DownloadStreamsCoreAsync(
+        string videoId,
+        VideoQualityPreference quality,
+        bool preferStereo,
+        string destinationDir,
+        CancellationToken ct)
     {
         var url = ToWatchUrl(videoId);
 
@@ -177,12 +260,15 @@ public sealed class YtDlpVideoEngine : IVideoEngine
         var videoFormat = $"bv*{HeightCap(quality)}";
         var audioFormat = preferStereo ? "ba[audio_channels<=2]/ba" : "ba";
 
-        var videoPath = await DownloadOneAsync(videoId, url, videoFormat,
-            Path.Combine(destinationDir, "%(id)s_video.%(ext)s"), ct);
+        // The video download also captures the "WxH" resolution in the SAME invocation (an extra
+        // --print field), so we avoid a third yt-dlp extraction against YouTube just to read it
+        // back — one fewer round-trip per cached item, which reduces the anti-throttle footprint.
+        var (videoPath, resolution) = await DownloadOneAsync(videoId, url, videoFormat,
+            Path.Combine(destinationDir, "%(id)s_video.%(ext)s"), captureResolution: true, ct);
         if (videoPath == null) return null;
 
-        var audioPath = await DownloadOneAsync(videoId, url, audioFormat,
-            Path.Combine(destinationDir, "%(id)s_audio.%(ext)s"), ct);
+        var (audioPath, _) = await DownloadOneAsync(videoId, url, audioFormat,
+            Path.Combine(destinationDir, "%(id)s_audio.%(ext)s"), captureResolution: false, ct);
         if (audioPath == null)
         {
             TryDelete(videoPath);
@@ -191,8 +277,6 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
         // A successful download clears any accumulated 403 state for this item.
         ClearHttp403(videoId);
-
-        var resolution = await GetResolutionAsync(url, videoFormat, ct);
 
         return new VideoDownload(
             videoPath,
@@ -340,18 +424,32 @@ public sealed class YtDlpVideoEngine : IVideoEngine
 
     /// <summary>
     /// Downloads a single selected format and returns the exact final file path
-    /// (<c>--print after_move:filepath</c>), or null on failure.
+    /// (<c>--print after_move:filepath</c>), or null path on failure. When
+    /// <paramref name="captureResolution"/> is set, a second <c>--print %(width)sx%(height)s</c>
+    /// field is emitted in the SAME invocation so the "WxH" resolution comes back without a
+    /// separate extraction (one fewer YouTube round-trip per cached item).
     /// </summary>
-    private async Task<string?> DownloadOneAsync(string videoId, string url, string format, string outputTemplate, CancellationToken ct)
+    private async Task<(string? path, string resolution)> DownloadOneAsync(
+        string videoId, string url, string format, string outputTemplate, bool captureResolution, CancellationToken ct)
     {
         var args = new List<string>
         {
             "--no-warnings",
             "-f", format,
             "-o", outputTemplate,
-            "--print", "after_move:filepath",
-            "--no-simulate",
         };
+        // Emit BOTH prints at the same after_move stage. A bare "%(width)sx%(height)s" template
+        // prints at the earlier video-processing stage, so mixing it with "after_move:filepath"
+        // interleaves stdout out of argument order. Binding the resolution to after_move: too keeps
+        // both on one stage; we still parse by CONTENT below (not position) to stay robust.
+        args.Add("--print");
+        args.Add("after_move:filepath");
+        if (captureResolution)
+        {
+            args.Add("--print");
+            args.Add("after_move:%(width)sx%(height)s");
+        }
+        args.Add("--no-simulate");
         AddThrottleArgs(args);
         args.Add(url);
 
@@ -364,35 +462,28 @@ public sealed class YtDlpVideoEngine : IVideoEngine
                 RecordHttp403(videoId);
 
             _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine", $"download failed ({exitCode}) fmt={format}: {Trim(stderr)}");
-            return null;
+            return (null, "");
         }
 
-        var path = stdout.Trim();
+        // Parse by content, not position: the resolution line matches "WxH" (digits x digits); the
+        // other non-empty line is the file path. This is stage-order-independent.
+        var lines = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var resolution = captureResolution
+            ? lines.FirstOrDefault(IsResolutionLine) ?? ""
+            : "";
+        var path = lines.FirstOrDefault(l => !IsResolutionLine(l)) ?? "";
         if (string.IsNullOrEmpty(path) || !File.Exists(path))
         {
             _log?.Invoke(LogLevel.Warning, "YtDlpVideoEngine", $"download produced no file for fmt={format}");
-            return null;
+            return (null, "");
         }
 
-        return path;
+        return (path, resolution);
     }
 
-    /// <summary>Resolves the "WxH" resolution of the selected video format (no download).</summary>
-    private async Task<string> GetResolutionAsync(string url, string videoFormat, CancellationToken ct)
-    {
-        // Called only from the download path (DownloadStreamsAsync), so run it on the DownloadGate
-        // to keep the whole download sequence off the interactive ProcessGate.
-        var (exitCode, stdout, _) = await RunDownloadAsync(new[]
-        {
-            "--no-warnings",
-            "-f", videoFormat,
-            "--print", "%(width)sx%(height)s",
-            url,
-        }, ct);
-
-        var res = stdout.Trim();
-        return exitCode == 0 && res.Contains('x') ? res : "";
-    }
+    /// <summary>True if a line looks like a yt-dlp "WxH" resolution token (e.g. "1920x1080").</summary>
+    private static bool IsResolutionLine(string line)
+        => System.Text.RegularExpressions.Regex.IsMatch(line, @"^\d+x\d+$");
 
     private async Task<(int exitCode, string stdout, string stderr)> RunAsync(
         IReadOnlyList<string> args, CancellationToken ct)
