@@ -70,8 +70,7 @@ jobs:
           path: artifacts/plugins.zip
           retention-days: 30
 
-      - name: Attach zip to Release (tagged builds only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/plugins.zip
+      # Note: this repo intentionally does NOT create a GitHub Release. Distribution model = the
+      # host client release IS the plugin snapshot (see phosphor release.yml, which builds plugins
+      # from source and folds them in). The combined plugins.zip above remains available as a
+      # workflow artifact for power-user drop-in hotfixes; no parallel Release stream is maintained.
