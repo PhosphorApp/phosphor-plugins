@@ -26,7 +26,12 @@ jobs:
         run: dotnet restore Phosphor.Plugins.slnx
 
       - name: Build (self-deploys to dist/plugins/<Name>)
-        run: dotnet build Phosphor.Plugins.slnx --no-restore -c Release
+        # Stamp FileVersion with the CI run number so an untagged drop-in build is identifiable on
+        # the app's About page (e.g. 1.0.0.47), distinct from a real release (which stamps the
+        # release version — see the host release workflow). AssemblyVersion is deliberately kept
+        # fixed at 1.0.0: it is the binding identity the host's AssemblyLoadContext resolves against,
+        # so it must not churn per build; only the informational FileVersion moves.
+        run: dotnet build Phosphor.Plugins.slnx --no-restore -c Release -p:FileVersion=1.0.0.${{ github.run_number }} -p:AssemblyVersion=1.0.0
 
       - name: Write plugins manifest
         shell: pwsh
