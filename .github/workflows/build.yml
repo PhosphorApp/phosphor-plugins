@@ -1,0 +1,72 @@
+name: Build Plugins
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    # Builds all Phosphor.Plugins.* into the canonical plugins/<Name>/ layout (via the shared
+    # Directory.Build.targets self-deploy, which falls back to ./dist when PHOSPHOR_HOST_DIR is unset).
+    # Publishes BOTH: per-plugin folder artifacts (power-user drop-in hotfix) and one combined
+    # plugins.zip (consumed by the host release workflow to build a client snapshot).
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore Phosphor.Plugins.slnx
+
+      - name: Build (self-deploys to dist/plugins/<Name>)
+        run: dotnet build Phosphor.Plugins.slnx --no-restore -c Release
+
+      - name: Write plugins manifest
+        shell: pwsh
+        run: |
+          $plugins = Get-ChildItem dist/plugins -Directory | ForEach-Object {
+            $dll = Join-Path $_.FullName ("Phosphor.Plugins." + $_.Name + ".dll")
+            $ver = if (Test-Path $dll) { (Get-Item $dll).VersionInfo.FileVersion } else { $null }
+            [pscustomobject]@{ name = $_.Name; assemblyVersion = $ver }
+          }
+          $manifest = [pscustomobject]@{
+            builtUtc      = (Get-Date).ToUniversalTime().ToString("o")
+            pluginsCommit = "${{ github.sha }}"
+            ref           = "${{ github.ref_name }}"
+            plugins       = $plugins
+          }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content dist/plugins/plugins-manifest.json
+          Get-Content dist/plugins/plugins-manifest.json
+
+      - name: Upload per-plugin folder artifacts (drop-in)
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-folders
+          path: dist/plugins/
+          retention-days: 30
+
+      - name: Create combined zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Compress-Archive -Path dist/plugins/* -DestinationPath artifacts/plugins.zip -Force
+
+      - name: Upload combined zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-zip
+          path: artifacts/plugins.zip
+          retention-days: 30
+
+      - name: Attach zip to Release (tagged builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/plugins.zip
