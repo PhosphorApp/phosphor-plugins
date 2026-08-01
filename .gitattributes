@@ -1,0 +1,10 @@
+# Treat these as binary: no line-ending normalization, no textual diffs.
+*.ttf   binary
+*.otf   binary
+*.exe   binary
+*.dll   binary
+*.png   binary
+*.ico   binary
+
+# Preserve verbatim third-party license texts exactly as published (no EOL normalization).
+licenses/** -text
