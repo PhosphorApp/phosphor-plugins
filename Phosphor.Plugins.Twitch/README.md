@@ -39,7 +39,7 @@ A source plug-in that browses and plays **Twitch** content. Loaded dynamically f
 
 ## Capabilities
 
-- `IBrowsable` — Favorites + Pinball (curated channels, live + VODs) + Categories + Top Live.
+- `IBrowsable` — Favorites + channel **groups** (curated channels, live + VODs) + Categories + Top Live.
 - `IPagedBrowsable` — lazy "load more" for Top Live, per-category live streams, and per-channel VODs
   (Twitch GQL is cursor-based; the source maps the host's offset paging onto forward cursors).
 - `ITextSearchCapable` — Twitch live-channel search.
@@ -54,13 +54,29 @@ A source plug-in that browses and plays **Twitch** content. Loaded dynamically f
 
 | Key | Type | Notes |
 |---|---|---|
-| `channels` | Text (multiple) | Curated pinball channel logins, one per line (e.g. `deadflip`). A full `twitch.tv/<login>` URL is also accepted and reduced to the login. |
+| `channelGroups` | Text (multiple) | Named channel **groups**, one per row (the host renders an add/remove list editor). Each row is `[icon] Name = login1, login2, …` (leading emoji optional). Groups surface as browse nodes inside the Twitch tile. |
 | `quality` | Enum | `Low` / `Medium` / `High` / `Max` height ceiling. |
 | `liveIndicator` | Bool | Decorate a currently-broadcasting channel's live feed with a red corner dot on its thumbnail (via the source-agnostic `SourceItem.ShowLiveBadge` hint). Default on. |
 
-Ships with a few pinball channels seeded by default (`deadflip`, `buffalopinball`,
-`straightdownthemiddle`, `foxcitiespinball`, `mpt3k`) — edit the list freely. Multi-instance: add
-several Twitch tiles if you want more than one.
+### Channel groups
+
+Instead of one fixed channel list, the plug-in surfaces **groups**: an arbitrary name (e.g. `Pinball`,
+`Concerts`) with a list of channel logins. Each group appears as its own browse node **inside the
+Twitch tile**; opening it lists the group's channels (live streams up top, a drill-in container per
+channel for VODs). Groups are added, renamed, and deleted directly in the plug-in's own settings —
+the `Channel groups` field is an add/remove list editor, one group per row:
+
+```
+⚪ Pinball = deadflip, buffalopinball, straightdownthemiddle, foxcitiespinball, mpt3k
+🎪 Concerts = channel_a, channel_b, channel_c
+```
+
+An optional leading emoji/glyph sets the tile icon (defaults to ⚪ when omitted). The name is
+everything after that up to the first `=`; the rest is a comma/space-delimited login list. A row with
+no `=` is treated as an unnamed group (its name defaults to the first login). A full
+`twitch.tv/<login>` URL is accepted anywhere a login is and reduced to the slug. Ships seeded with a
+single `⚪ Pinball` group (`deadflip`, `buffalopinball`, `straightdownthemiddle`, `foxcitiespinball`,
+`mpt3k`). Multi-instance: add several Twitch tiles if you want more than one.
 
 ## Limitations
 

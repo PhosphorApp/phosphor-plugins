@@ -11,9 +11,9 @@ internal sealed record TwState(string Url, bool IsLive, string? ChannelLogin = n
 
 // Node identity carried in SourceCategory.SourceState. Login is set for Channel/ChannelVods nodes;
 // CategoryName is set for a Category node (the Twitch "game name" its streams are listed under).
-internal sealed record TwNode(TwNodeKind Kind, string? Login = null, string? CategoryName = null);
+internal sealed record TwNode(TwNodeKind Kind, string? Login = null, string? CategoryName = null, string? GroupName = null);
 
-internal enum TwNodeKind { Root, Favorites, Pinball, TopLive, ChannelVods, Categories, Category }
+internal enum TwNodeKind { Root, Favorites, ChannelGroup, TopLive, ChannelVods, Categories, Category }
 
 // A favorite is always a CHANNEL (keyed by its stable login), never a specific video. Twitch VODs
 // expire quickly (days–weeks), so pinning a video id would go stale; a channel login is permanent.
@@ -37,7 +37,7 @@ public sealed class TwitchSource :
 
     private static readonly string IconRoot = char.ConvertFromUtf32(0x1F3AE);     // game controller
     private static readonly string IconFav = char.ConvertFromUtf32(0x2B50);       // star
-    private static readonly string IconPinball = char.ConvertFromUtf32(0x26AA);   // white circle (a pinball)
+    private static readonly string IconPinball = char.ConvertFromUtf32(0x26AA);   // white circle (a pinball / default group glyph)
     private static readonly string IconLive = char.ConvertFromUtf32(0x1F534);     // red circle
     private static readonly string IconCategories = char.ConvertFromUtf32(0x1F5C2) + char.ConvertFromUtf32(0xFE0F); // card index dividers
     private static readonly string IconCategory = char.ConvertFromUtf32(0x1F4C2); // open folder
@@ -50,7 +50,10 @@ public sealed class TwitchSource :
     private TwitchGqlClient? _client;
 
     private VideoQuality _quality = VideoQuality.High;
-    private List<string> _channels = new();
+
+    // User-defined channel groups (Pinball/Concerts/…). Plug-in-owned: parsed from the plug-in's own
+    // "channelGroups" settings rows, surfaced as browse nodes inside the Twitch tile.
+    private List<TwitchChannelGroup> _groups = new();
     private bool _liveIndicator = true;
 
     private Dictionary<string, TwFavorite> _favorites = new(StringComparer.OrdinalIgnoreCase);
@@ -89,26 +92,10 @@ public sealed class TwitchSource :
 
         _liveIndicator = !bool.TryParse(Get(values, TwitchSourceProvider.KeyLiveIndicator), out var li) || li;
 
-        var raw = Get(values, TwitchSourceProvider.KeyChannels);
-        var channels = (raw ?? string.Join('\n', TwitchSourceProvider.DefaultChannels))
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(NormalizeLogin)
-            .Where(s => s.Length > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        lock (_gate) _channels = channels;
-    }
-
-    // Accept either a bare login or a full twitch.tv/<login> URL and reduce to the login slug.
-    private static string NormalizeLogin(string s)
-    {
-        s = s.Trim();
-        var idx = s.LastIndexOf("twitch.tv/", StringComparison.OrdinalIgnoreCase);
-        if (idx >= 0) s = s[(idx + "twitch.tv/".Length)..];
-        s = s.TrimStart('@').Trim('/');
-        var slash = s.IndexOf('/');
-        if (slash >= 0) s = s[..slash];
-        return s.ToLowerInvariant();
+        // Parse the user's channel-group rows ("Name = login1, login2"). The setting ships seeded with
+        // a default "Pinball" row, so a fresh instance still surfaces the baked-in group.
+        var groups = TwitchChannelGroups.Parse(Get(values, TwitchSourceProvider.KeyChannelGroups));
+        lock (_gate) _groups = groups;
     }
 
     private void EnsureClient()
@@ -173,8 +160,8 @@ public sealed class TwitchSource :
                 return await BrowseRootAsync(ct);
             case TwNodeKind.Favorites:
                 return await BrowseFavoritesAsync(ct);
-            case TwNodeKind.Pinball:
-                return await BrowsePinballAsync(ct);
+            case TwNodeKind.ChannelGroup:
+                return await BrowseChannelGroupAsync(node.GroupName, ct);
             case TwNodeKind.Categories:
                 return await BrowseCategoriesAsync(ct);
             // Paged nodes (TopLive, ChannelVods, Category) return NO items here on purpose: the empty
@@ -234,8 +221,8 @@ public sealed class TwitchSource :
     private async Task<BrowseResult> BrowseRootAsync(CancellationToken ct)
     {
         await Task.CompletedTask;
-        bool hasChannels;
-        lock (_gate) hasChannels = _channels.Count > 0;
+        List<TwitchChannelGroup> groups;
+        lock (_gate) groups = _groups.ToList();
 
         var cats = new List<SourceCategory>
         {
@@ -250,17 +237,18 @@ public sealed class TwitchSource :
             },
         };
 
-        // Only surface the Pinball node when the user has at least one curated channel configured.
-        if (hasChannels)
+        // One browse node per user-defined channel group (Pinball, Concerts, …), inside the Twitch
+        // tile — edited via the plug-in's own "Channel groups" setting.
+        foreach (var g in groups)
         {
             cats.Add(new SourceCategory
             {
                 SourceInstanceId = InstanceId,
-                CategoryId = "pinball",
-                Title = "Pinball",
-                Icon = IconPinball,
+                CategoryId = $"group:{TwitchChannelGroups.Slug(g.Name)}",
+                Title = g.Name,
+                Icon = string.IsNullOrEmpty(g.Icon) ? IconPinball : g.Icon,
                 HasSubCategories = true,
-                SourceState = new TwNode(TwNodeKind.Pinball),
+                SourceState = new TwNode(TwNodeKind.ChannelGroup, GroupName: g.Name),
             });
         }
 
@@ -286,12 +274,16 @@ public sealed class TwitchSource :
         return new BrowseResult { Categories = cats };
     }
 
-    // The Pinball node: one sub-node per curated channel (their VODs), plus any that are live NOW
-    // surfaced directly as playable live items at the top.
-    private async Task<BrowseResult> BrowsePinballAsync(CancellationToken ct)
+    // A channel-group node (e.g. "Pinball"): one sub-node per channel in the group (their VODs), plus
+    // any that are live NOW surfaced directly as playable live items at the top — mirroring the old
+    // curated-Pinball node, now generalized to any user-defined group.
+    private async Task<BrowseResult> BrowseChannelGroupAsync(string? groupName, CancellationToken ct)
     {
         List<string> channels;
-        lock (_gate) channels = _channels.ToList();
+        lock (_gate)
+            channels = _groups
+                .FirstOrDefault(g => string.Equals(g.Name, groupName, StringComparison.OrdinalIgnoreCase))
+                ?.Channels.ToList() ?? [];
 
         var liveItems = new List<SourceItem>();
         var cats = new List<SourceCategory>();
@@ -664,19 +656,30 @@ public sealed class TwitchSource :
         lock (_gate) _cursors[$"{categoryId}@{offset}"] = cursor;
     }
 
-    private static TwNode NodeFromId(string categoryId) => categoryId switch
+    private TwNode NodeFromId(string categoryId) => categoryId switch
     {
         "root" => new TwNode(TwNodeKind.Root),
         "favorites" => new TwNode(TwNodeKind.Favorites),
-        "pinball" => new TwNode(TwNodeKind.Pinball),
         "toplive" => new TwNode(TwNodeKind.TopLive),
         "categories" => new TwNode(TwNodeKind.Categories),
+        _ when categoryId.StartsWith("group:", StringComparison.Ordinal) =>
+            new TwNode(TwNodeKind.ChannelGroup, GroupName: GroupNameForSlug(categoryId["group:".Length..])),
         _ when categoryId.StartsWith("vods:", StringComparison.Ordinal) =>
             new TwNode(TwNodeKind.ChannelVods, categoryId["vods:".Length..]),
         _ when categoryId.StartsWith("cat:", StringComparison.Ordinal) =>
             new TwNode(TwNodeKind.Category, CategoryName: categoryId["cat:".Length..]),
         _ => new TwNode(TwNodeKind.Root),
     };
+
+    // Resolves a group node's slug (from its "group:{slug}" id) back to the live group name, so a node
+    // reconstructed from its id alone (no carried SourceState) still finds the right channel list.
+    private string? GroupNameForSlug(string slug)
+    {
+        lock (_gate)
+            return _groups
+                .FirstOrDefault(g => string.Equals(TwitchChannelGroups.Slug(g.Name), slug, StringComparison.OrdinalIgnoreCase))
+                ?.Name;
+    }
 
     private static string? Get(IReadOnlyDictionary<string, string?> values, string key) =>
         values.TryGetValue(key, out var v) ? v : null;

@@ -16,27 +16,19 @@ public sealed class TwitchSourceProvider : IPhosphorSourceProvider, IExperimenta
 {
     public const string TwitchTypeId = "twitch";
 
-    /// <summary>Settings key: curated channel logins (one per line), shown under a "Pinball" node.</summary>
-    public const string KeyChannels = "channels";
+    /// <summary>
+    /// Settings key holding the user's channel groups, one per row (the host renders an add/remove
+    /// list editor via <c>AllowMultiple</c>). Each row is <c>Name = login1, login2, …</c>; groups
+    /// surface as browse nodes inside the Twitch tile. Owned by the plug-in; seeded with a "Pinball"
+    /// row on first run.
+    /// </summary>
+    public const string KeyChannelGroups = "channelGroups";
 
     /// <summary>Settings key: coarse video quality ceiling.</summary>
     public const string KeyQuality = "quality";
 
     /// <summary>Settings key: decorate the now-live feed's thumbnail with a red corner dot.</summary>
     public const string KeyLiveIndicator = "liveIndicator";
-
-    /// <summary>
-    /// Seed channels the plug-in ships with. Pinball-cabinet-relevant streamers/creators; users edit
-    /// the list freely in settings. Kept as logins (the twitch.tv/&lt;login&gt; slug).
-    /// </summary>
-    public static readonly IReadOnlyList<string> DefaultChannels =
-    [
-        "deadflip",         // Dead Flip — long-running pinball streams
-        "buffalopinball",   // Buffalo Pinball
-        "straightdownthemiddle",
-        "foxcitiespinball", // Fox Cities Pinball
-        "mpt3k",            // MPT3K
-    ];
 
     public string TypeId => TwitchTypeId;
     public string DisplayName => "Twitch";
@@ -52,10 +44,12 @@ public sealed class TwitchSourceProvider : IPhosphorSourceProvider, IExperimenta
 
     public IReadOnlyList<PluginSettingDescriptor> GetSettingsSchema() =>
     [
-        new(KeyChannels, "Pinball channels", PluginSettingType.Text,
-            DefaultValue: string.Join('\n', DefaultChannels),
-            HelpText: "Twitch channel logins to surface under the Pinball tile (one per line). " +
-                      "Use the name from the channel URL, e.g. twitch.tv/deadflip → deadflip.")
+        new(KeyChannelGroups, "Channel groups", PluginSettingType.Text,
+            DefaultValue: TwitchChannelGroups.DefaultRows,
+            HelpText: "Named channel groups shown as tiles inside Twitch (one group per row). " +
+                      "Format: \"[icon] Name = login1, login2\" — an optional leading emoji sets the " +
+                      "tile glyph (default ⚪), e.g. \"🎪 Concerts = channel_a, channel_b\". " +
+                      "A full twitch.tv/<login> URL also works.")
         {
             AllowMultiple = true,
         },
@@ -66,7 +60,7 @@ public sealed class TwitchSourceProvider : IPhosphorSourceProvider, IExperimenta
         },
         new(KeyLiveIndicator, "Show live indicator", PluginSettingType.Bool, DefaultValue: "true",
             HelpText: "Mark currently-broadcasting channels as live — a red dot on the live feed's " +
-                      "thumbnail, and a red ● LIVE tag on live channel tiles (in Favorites and Pinball)."),
+                      "thumbnail, and a red ● LIVE tag on live channel tiles (in Favorites and groups)."),
     ];
 
     public IPhosphorSource CreateInstance(string instanceId, IReadOnlyDictionary<string, string?> settings)
