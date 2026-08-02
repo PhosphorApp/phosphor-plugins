@@ -15,6 +15,10 @@ x86/
 *.sln.docstates
 *.rsuser
 
+# Visual Studio backup files (created during edits by some VS tooling)
+*.Backup.tmp
+*.backup.tmp
+
 # NuGet
 **/[Pp]ackages/*
 !**/[Pp]ackages/build/
