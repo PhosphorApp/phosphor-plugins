@@ -21,16 +21,19 @@ internal static class PlexMappings
     /// </summary>
     public static SourceItem ToSourceItem(VideoItem v, string instanceId)
     {
-        bool isContainer = v.PlexItemType is PlexItemType.Artist or PlexItemType.Album;
-        // Containers (artist/album) drill in via IBrowsable, so they must carry a PlexNode the host
-        // hands back to BrowseAsync — NOT the VideoItem (which is for playback/resolve of leaves).
-        // Artists/albums only exist in music ("artist") libraries, so LibraryType is always "artist".
-        object? state = isContainer
-            ? new PlexNode(
-                v.PlexItemType == PlexItemType.Artist ? PlexNodeKind.Artist : PlexNodeKind.Album,
-                v.PlexRatingKey ?? "",
-                "artist")
-            : v;
+        bool isContainer = v.PlexItemType is PlexItemType.Artist or PlexItemType.Album
+            or PlexItemType.Show or PlexItemType.Season;
+        // Containers (artist/album/show/season) drill in via IBrowsable, so they must carry a PlexNode
+        // the host hands back to BrowseAsync — NOT the VideoItem (which is for playback/resolve of
+        // leaves). Artists/albums live in music ("artist") libraries; shows/seasons in TV ("show").
+        object? state = v.PlexItemType switch
+        {
+            PlexItemType.Artist => new PlexNode(PlexNodeKind.Artist, v.PlexRatingKey ?? "", "artist"),
+            PlexItemType.Album => new PlexNode(PlexNodeKind.Album, v.PlexRatingKey ?? "", "artist"),
+            PlexItemType.Show => new PlexNode(PlexNodeKind.Show, v.PlexRatingKey ?? "", "show"),
+            PlexItemType.Season => new PlexNode(PlexNodeKind.Season, v.PlexRatingKey ?? "", "show"),
+            _ => v,
+        };
         return new SourceItem
         {
             SourceInstanceId = instanceId,
@@ -81,9 +84,11 @@ internal static class PlexMappings
         {
             PlexNodeKind.Artist => "🎤",
             PlexNodeKind.Album => "💿",
+            PlexNodeKind.Show => "📺",
+            PlexNodeKind.Season => "🗂️",
             _ => null,
         },
-        HasSubCategories = node.Kind is not PlexNodeKind.Album, // albums expand straight to tracks
+        HasSubCategories = node.Kind is not (PlexNodeKind.Album or PlexNodeKind.Season), // albums/seasons expand straight to leaves
         SourceState = node,
     };
 

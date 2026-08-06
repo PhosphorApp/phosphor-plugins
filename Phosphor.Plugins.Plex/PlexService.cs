@@ -134,14 +134,23 @@ public class PlexService
     /// </summary>
     public async Task<PlexPage> GetLibraryVideosPageAsync(string sectionKey, int start, int count, string? libraryType = null, CancellationToken ct = default)
     {
-        // Music libraries: type=8 for artists at top level, type=10 for tracks
-        var typeFilter = libraryType == "artist" ? "&type=8" : "";
+        // Music libraries: type=8 for artists at top level, type=10 for tracks.
+        // TV libraries: type=2 for shows at the top level (they drill into seasons → episodes).
+        var typeFilter = libraryType switch
+        {
+            "artist" => "&type=8",
+            "show" => "&type=2",
+            _ => "",
+        };
         var url = $"{_serverUrl}/library/sections/{sectionKey}/all?X-Plex-Container-Start={start}&X-Plex-Container-Size={count}{typeFilter}&X-Plex-Token={_token}{StreamParam}";
         var doc = await FetchJsonAsync(url, ct);
 
-        var items = libraryType == "artist"
-            ? ParsePlexItems(doc, PlexItemType.Artist)
-            : ParseVideos(doc);
+        var items = libraryType switch
+        {
+            "artist" => ParsePlexItems(doc, PlexItemType.Artist),
+            "show" => ParsePlexItems(doc, PlexItemType.Show),
+            _ => ParseVideos(doc),
+        };
 
         int totalSize = 0;
         if (doc.RootElement.TryGetProperty("MediaContainer", out var mc) &&
@@ -290,6 +299,10 @@ public class PlexService
         var doc = await FetchJsonAsync(url, ct);
 
         if (childType == PlexItemType.Track)
+            return ParseVideos(doc);
+
+        // Episodes are playable leaves (have Media/Part), just like tracks.
+        if (childType == PlexItemType.Episode)
             return ParseVideos(doc);
 
         var items = ParsePlexItems(doc, childType);
@@ -662,6 +675,8 @@ public class PlexService
             {
                 "artist" => MapToPlexItem(m, PlexItemType.Artist),
                 "album" => MapToPlexItem(m, PlexItemType.Album),
+                "show" => MapToPlexItem(m, PlexItemType.Show),
+                "season" => MapToPlexItem(m, PlexItemType.Season),
                 _ => MapToVideoItem(m)
             };
             if (item != null)

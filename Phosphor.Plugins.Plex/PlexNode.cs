@@ -17,6 +17,10 @@ internal enum PlexNodeKind
     Artist,
     /// <summary>An album — expands to its tracks.</summary>
     Album,
+    /// <summary>A TV show — expands to its seasons.</summary>
+    Show,
+    /// <summary>A TV season — expands to its episodes (playable leaves).</summary>
+    Season,
     /// <summary>The "Hubs" grouping under a library — expands to the library's hubs.</summary>
     HubList,
     /// <summary>A single hub — expands to its items.</summary>

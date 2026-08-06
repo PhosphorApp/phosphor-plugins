@@ -254,6 +254,8 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
             PlexNodeKind.LiveTv => await BrowseLiveTvAsync(node, ct),
             PlexNodeKind.Artist => await BrowseChildrenAsync(node, PlexItemType.Album, PlexNodeKind.Album, ct),
             PlexNodeKind.Album => await BrowseTracksAsync(node, ct),
+            PlexNodeKind.Show => await BrowseChildrenAsync(node, PlexItemType.Season, PlexNodeKind.Season, ct),
+            PlexNodeKind.Season => await BrowseEpisodesAsync(node, ct),
             PlexNodeKind.HubList => await BrowseHubListAsync(node, ct),
             PlexNodeKind.Hub => await BrowseHubAsync(node, ct),
             PlexNodeKind.PlaylistList => await BrowsePlaylistListAsync(node, ct),
@@ -375,6 +377,12 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
     {
         var tracks = await _plex.GetChildrenAsync(node.Key, PlexItemType.Track, ct);
         return new BrowseResult { Items = tracks.Select(v => PlexMappings.ToSourceItem(v, InstanceId)).ToList() };
+    }
+
+    private async Task<BrowseResult> BrowseEpisodesAsync(PlexNode node, CancellationToken ct)
+    {
+        var episodes = await _plex.GetChildrenAsync(node.Key, PlexItemType.Episode, ct);
+        return new BrowseResult { Items = episodes.Select(v => PlexMappings.ToSourceItem(v, InstanceId)).ToList() };
     }
 
     private async Task<BrowseResult> BrowseHubListAsync(PlexNode node, CancellationToken ct)
