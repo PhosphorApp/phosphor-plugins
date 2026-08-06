@@ -192,8 +192,11 @@ public sealed class JellyfinSource :
         {
             ct.ThrowIfCancellationRequested();
 
-            // When the user has chosen specific libraries, show only those; empty = show all.
-            if (_selectedLibraryIds.Count > 0 && !_selectedLibraryIds.Contains(v.Id))
+            // Only surface libraries the user has explicitly added via the host's library editor.
+            // Empty = none configured = no tiles (matches Plex). Do NOT fall back to "show all" here:
+            // the host treats an empty selection as "no libraries added", so showing everything would
+            // resurrect removed/never-added libraries as tiles.
+            if (!_selectedLibraryIds.Contains(v.Id))
                 continue;
 
             var isLiveTv = string.Equals(v.CollectionType, "livetv", StringComparison.OrdinalIgnoreCase);
