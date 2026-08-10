@@ -67,7 +67,7 @@ channel for VODs). Groups are added, renamed, and deleted directly in the plug-i
 the `Channel groups` field is an add/remove list editor, one group per row:
 
 ```
-⚪ Pinball = deadflip, buffalopinball, straightdownthemiddle, foxcitiespinball, mpt3k
+⚪ Pinball = deadflip, buffalopinball, sdtmpinball, foxcitiespinball, mpt3k
 🎪 Concerts = channel_a, channel_b, channel_c
 ```
 
@@ -75,7 +75,7 @@ An optional leading emoji/glyph sets the tile icon (defaults to ⚪ when omitted
 everything after that up to the first `=`; the rest is a comma/space-delimited login list. A row with
 no `=` is treated as an unnamed group (its name defaults to the first login). A full
 `twitch.tv/<login>` URL is accepted anywhere a login is and reduced to the slug. Ships seeded with a
-single `⚪ Pinball` group (`deadflip`, `buffalopinball`, `straightdownthemiddle`, `foxcitiespinball`,
+single `⚪ Pinball` group (`deadflip`, `buffalopinball`, `sdtmpinball`, `foxcitiespinball`,
 `mpt3k`). Multi-instance: add several Twitch tiles if you want more than one.
 
 ## Limitations

@@ -18,7 +18,7 @@
 	<ImplicitUsings>enable</ImplicitUsings>
 	<AssemblyName>Phosphor.Plugins.Twitch</AssemblyName>
 	<RootNamespace>Phosphor.Plugins.Twitch</RootNamespace>
-	<Version>1.0.0</Version>
+	<Version>1.0.1</Version>
 	<IsPackable>false</IsPackable>
 	<EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
@@ -28,6 +28,20 @@
 	  <ExcludeAssets>runtime</ExcludeAssets>
 	  <PrivateAssets>all</PrivateAssets>
 	</PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+	<!-- Plug-in-owned template defining the authoritative default channel groups. Copied to the
+		 plug-in output and self-deployed to the host so it sits next to the DLL at runtime. Edit it
+		 to rename/add/remove default groups without recompiling. -->
+	<Content Include="default_channel_groups.json">
+	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</Content>
+	<!-- Also deploy the bundled json alongside the plug-in (shared Directory.Build.targets copies
+		 PhosphorPluginExtraDeployFiles into plugins/Twitch/). Reference the SOURCE file (which always
+		 exists), not $(TargetDir): that is resolved at static-evaluation time — before Build
+		 populates $(TargetDir) — so on a clean build the condition is false and it never deploys. -->
+	<PhosphorPluginExtraDeployFiles Include="$(MSBuildProjectDirectory)\default_channel_groups.json" />
   </ItemGroup>
 
 </Project>

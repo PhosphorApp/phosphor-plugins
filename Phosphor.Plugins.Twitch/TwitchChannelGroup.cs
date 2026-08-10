@@ -1,3 +1,6 @@
+using System.Text.Json;
+using Phosphor.Plugin.Abstractions;
+
 namespace Phosphor.Plugins.Twitch;
 
 /// <summary>
@@ -22,21 +25,77 @@ public static class TwitchChannelGroups
     /// <summary>Default glyph used for a group whose row omits a leading icon (a "pinball" white circle).</summary>
     public static readonly string DefaultIcon = char.ConvertFromUtf32(0x26AA);
 
-    /// <summary>The default group shipped on first run: "Pinball" with the historical curated logins.</summary>
-    public static readonly IReadOnlyList<TwitchChannelGroup> Defaults =
+    /// <summary>Bundled template defining the authoritative default channel groups, shipped next to the DLL.</summary>
+    private const string DefaultsFileName = "default_channel_groups.json";
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = true,
+    };
+
+    /// <summary>
+    /// Built-in fallback seed, used only if the bundled <c>default_channel_groups.json</c> cannot be
+    /// found or read. Mirrors the template file so the plug-in still ships sensible defaults even
+    /// from a stripped deployment.
+    /// </summary>
+    private static readonly IReadOnlyList<TwitchChannelGroup> Seed =
     [
         new("Pinball",
         [
             "deadflip",
             "buffalopinball",
-            "straightdownthemiddle",
+            "sdtmpinball",
             "foxcitiespinball",
             "mpt3k",
         ], DefaultIcon),
     ];
 
+    /// <summary>
+    /// The default groups shipped on first run: the bundled <c>default_channel_groups.json</c> next
+    /// to the plug-in DLL if present and valid, otherwise the built-in <see cref="Seed"/>. So the
+    /// defaults can be managed (rename/add/remove) by editing the template file, no recompile.
+    /// </summary>
+    public static IReadOnlyList<TwitchChannelGroup> LoadDefaults(Action<LogLevel, string>? log = null)
+        => TryLoadDefaultsFile(log) ?? Seed;
+
     /// <summary>The default rows, in the settings-string form, used to seed the settings default value.</summary>
-    public static string DefaultRows => string.Join('\n', Defaults.Select(FormatRow));
+    public static string DefaultRows => string.Join('\n', LoadDefaults().Select(FormatRow));
+
+    /// <summary>DTO mirroring the bundled <c>default_channel_groups.json</c> shape.</summary>
+    private sealed record DefaultGroupDto(string? Name, string? Icon, List<string>? Channels, int SortOrder = 0);
+
+    private static IReadOnlyList<TwitchChannelGroup>? TryLoadDefaultsFile(Action<LogLevel, string>? log)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(typeof(TwitchChannelGroups).Assembly.Location);
+            if (string.IsNullOrEmpty(dir)) return null;
+            var path = Path.Combine(dir, DefaultsFileName);
+            if (!File.Exists(path)) return null;
+
+            var parsed = JsonSerializer.Deserialize<List<DefaultGroupDto>>(File.ReadAllText(path), JsonOptions);
+            if (parsed is not { Count: > 0 }) return null;
+
+            var groups = parsed
+                .OrderBy(g => g.SortOrder)
+                .Select(g => new TwitchChannelGroup(
+                    string.IsNullOrWhiteSpace(g.Name) ? (g.Channels?.FirstOrDefault() ?? "") : g.Name!,
+                    (g.Channels ?? []).Select(NormalizeLogin).Where(s => s.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                    string.IsNullOrEmpty(g.Icon) ? DefaultIcon : g.Icon))
+                .Where(g => g.Channels.Count > 0)
+                .ToList();
+
+            if (groups.Count == 0) return null;
+            log?.Invoke(LogLevel.Debug, $"Twitch: loaded default channel groups from {path}");
+            return groups;
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke(LogLevel.Warning, $"Twitch: default channel groups read failed: {ex.Message}");
+            return null;
+        }
+    }
 
     /// <summary>Parses the multi-row settings value (newline-separated) into groups, dropping empties.</summary>
     public static List<TwitchChannelGroup> Parse(string? rows)

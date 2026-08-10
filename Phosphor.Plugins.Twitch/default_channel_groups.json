@@ -1,0 +1,8 @@
+[
+  {
+    "Name": "Pinball",
+    "Icon": "⚪",
+    "Channels": ["deadflip", "buffalopinball", "sdtmpinball", "foxcitiespinball", "mpt3k"],
+    "SortOrder": 0
+  }
+]
