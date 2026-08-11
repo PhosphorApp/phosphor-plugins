@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.SiriusXM;
 /// suppresses seek/duration and never auto-advances.
 /// </remarks>
 public sealed class SiriusXmSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable, IRefreshable, IDisposable
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable, IRefreshable, ILiveNowPlayingProvider, IReplayableById, IDisposable
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
@@ -322,6 +322,37 @@ public sealed class SiriusXmSource :
         SourceState = c,
     };
 
+    // ── IReplayableById (rebuild a playable channel from its id) ─────────────────
+
+    /// <summary>
+    /// Rebuilds a playable channel <see cref="SourceItem"/> from a channel id. Backs history replay
+    /// and queue-after-restart, where the live <c>SourceState</c> from browse is gone and only the id
+    /// survives. Uses the cached lineup synchronously; if the channel isn't in cache we still return a
+    /// minimal item carrying the id, since <see cref="ResolveAsync"/> can resolve from the id alone.
+    /// </summary>
+    public SourceItem? RebuildPlayable(string itemId)
+    {
+        if (string.IsNullOrEmpty(itemId)) return null;
+
+        IReadOnlyList<SxmChannel>? channels;
+        lock (_gate) channels = _channels;
+        channels ??= LoadLineupCache();
+        var ch = channels?.FirstOrDefault(c => c.Id == itemId);
+        if (ch is not null) return ToSourceItem(ch);
+
+        // Not in cache (e.g. lineup not yet loaded this session) — a minimal item is enough for
+        // ResolveAsync, which resolves the channel from ItemId when SourceState is absent.
+        return new SourceItem
+        {
+            SourceInstanceId = InstanceId,
+            ItemId = itemId,
+            Title = itemId,
+            Subtitle = "SiriusXM",
+            IsAudioOnly = true,
+            IsLiveStream = true,
+        };
+    }
+
     // ── IFavoritable ────────────────────────────────────────────────────────────
 
     public bool IsFavorite(string itemId)
@@ -513,6 +544,35 @@ public sealed class SiriusXmSource :
     public Task<SourceMetadata?> GetMetadataAsync(SourceItem item, CancellationToken ct = default)
         // Live radio has no fixed duration/chapters — nothing to enrich.
         => Task.FromResult<SourceMetadata?>(null);
+
+    // ── ILiveNowPlayingProvider (current song for the playing channel) ──────────
+
+    /// <summary>
+    /// Returns the currently-airing track for a playing channel, polled by the host while the live
+    /// stream plays. Resolves the channel from <paramref name="itemId"/> and reuses the authenticated
+    /// client; returns null (no update) on any failure so the host simply keeps the last title.
+    /// </summary>
+    public async Task<LiveNowPlaying?> GetNowPlayingAsync(string itemId, TimeSpan? playbackPosition, CancellationToken ct = default)
+    {
+        try
+        {
+            var channel = (await EnsureChannelsAsync(ct)).FirstOrDefault(c => c.Id == itemId);
+            if (channel == null) return null;
+
+            var client = await EnsureClientAsync(ct);
+            if (client == null) return null;
+
+            var np = await client.GetNowPlayingAsync(channel, playbackPosition, ct);
+            if (np == null) return null;
+            return new LiveNowPlaying(np.Title, np.Artist, np.Album, np.NextChangeUtc);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, $"SXM now-playing failed: {ex.Message}");
+            return null;
+        }
+    }
 
     // ── IRefreshable (fetch/rebuild the channel lineup on demand) ───────────────
 
