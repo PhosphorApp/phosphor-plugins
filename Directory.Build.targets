@@ -12,6 +12,14 @@
 	  * If the PHOSPHOR_HOST_DIR environment variable is set, deploy into $(PHOSPHOR_HOST_DIR)/plugins/<Name>.
 		Point it at a built host output (e.g. E:\phosphor\Phosphor\bin\Debug\net8.0-windows) so an
 		F5 of the host picks up freshly built plug-ins — the dev inner loop.
+
+		RECOMMENDED (dev inner loop): set this once at the user level so every build deploys straight
+		into the host's plug-in load directory (no manual copy from dist/ — a stale host copy is the
+		classic "my plug-in change isn't taking effect" trap). PowerShell, one time per machine:
+		  [Environment]::SetEnvironmentVariable('PHOSPHOR_HOST_DIR',
+			'E:\phosphorapp\phosphor\Phosphor\bin\Debug\net8.0-windows', 'User')
+		Then restart the shell/IDE so the variable is inherited. Verify a build prints
+		"Deployed <Name> plug-in to ...\bin\Debug\net8.0-windows\plugins\<Name>".
 	  * Otherwise deploy into a repo-local dist/plugins/<Name>, so a plain `dotnet build` still produces
 		the canonical plugins/<Name>/ layout (used by CI to assemble drop-in artifacts and the snapshot).
 

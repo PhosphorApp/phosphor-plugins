@@ -115,22 +115,32 @@ public sealed class SxmEdgeClient : IDisposable
     /// </summary>
     public async Task<SxmNowPlaying?> GetNowPlayingAsync(SxmChannel channel, TimeSpan? playbackPosition = null, CancellationToken ct = default)
     {
+        var r = await FetchLiveUpdateAsync(channel, ct);
+        if (r is not { } root) return null;
+        return ExtractNowPlaying(root, playbackPosition, _log);
+    }
+
+    // Shared liveUpdate POST used by now-playing: resolves the channelId and requests the schedule
+    // window, parsed by ExtractNowPlaying from the returned root.
+    private async Task<JsonElement?> FetchLiveUpdateAsync(SxmChannel channel, CancellationToken ct)
+    {
         if (!await LoginIfNecessaryAsync(false, 0, ct)) return null;
 
         var channelId = await ResolveEdgeChannelIdAsync(channel, ct);
         if (channelId == null) { _log?.Invoke($"SXM: no edge channelId for '{channel.Id}' (#{channel.Number})."); return null; }
 
         var now = DateTimeOffset.UtcNow;
-        // Window: a few hours back (schedule) to a minute ahead, mirroring the reference.
+        // Window: a few hours back (schedule) to a minute ahead, mirroring the reference. NOTE: a wider
+        // forward window does NOT surface future song cuts — the feed only publishes cuts once they
+        // start airing (verified: a 45-minute lookahead still returned 0 future songs), which is why
+        // "up next" could not be sourced from liveUpdate and was not implemented.
         var body = new Dictionary<string, string>
         {
             ["channelId"] = channelId,
             ["startTimestamp"] = Iso(now.AddHours(-3).AddMinutes(-10)),
             ["endTimestamp"] = Iso(now.AddMinutes(1)),
         };
-        var resp = await SendJsonAsync(HttpMethod.Post, "/playback/play/v1/liveUpdate", body, ct);
-        if (resp is not { } r) return null;
-        return ExtractNowPlaying(r, playbackPosition, _log);
+        return await SendJsonAsync(HttpMethod.Post, "/playback/play/v1/liveUpdate", body, ct);
     }
 
     // ── Public: live stream resolution (tuneSource + key + pre-signed CDN) ───────

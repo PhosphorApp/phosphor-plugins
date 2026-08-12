@@ -613,6 +613,15 @@ public sealed class SiriusXmSource :
         }
     }
 
+    // ── ILiveUpNextProvider (next song coming up on the playing channel) ─────────
+    //
+    // NOT IMPLEMENTED. Investigated and abandoned: the edge-gateway liveUpdate feed does not publish
+    // song cuts before they start airing (empirically the newest cut it returns is the currently-
+    // airing one, regardless of how far ahead endTimestamp asks — verified with a 45-minute forward
+    // window still yielding futureSongs=0). So there is no usable lookahead to source "up next" from.
+    // A real forward schedule/EPG endpoint would be required; if one is found, implement
+    // ILiveUpNextProvider (and possibly ILiveUpcomingProvider) here against it.
+
     // ── IRefreshable (fetch/rebuild the channel lineup on demand) ───────────────
 
     // Refreshable whenever credentials are present. This backs two host flows: an explicit

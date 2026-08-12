@@ -6,7 +6,7 @@ Loaded dynamically from the host's `plugins/SiriusXM/` folder; references only
 
 ## Status
 
-**v1.2.1** — runs entirely on the SiriusXM **edge-gateway API**
+**v1.3.0** — runs entirely on the SiriusXM **edge-gateway API**
 (`api.edge-gateway.siriusxm.com`) with **bearer-token (JWT)** auth. Auth, channel lineup, now-playing,
 and live streaming are all off the deprecated cookie `player.siriusxm.com` path. The legacy cookie
 code is retained as a compile-time fallback only (see **Legacy fallback**).
@@ -67,6 +67,17 @@ Implements `ILiveNowPlayingProvider`. While a channel plays, the host polls
 instant. The audio instant is anchored at `now − LiveAudioLagMs` (the HLS buffer behind live, ~30s)
 so the label matches what's actually heard; talk content falls back to the current episode/show title.
 Diagnostics: a `SXM np:` Debug line logs the anchoring math for tuning.
+
+## Up next (coming-up track) — investigated, NOT implemented
+
+The plugin does **not** implement `ILiveUpNextProvider` (abstractions 0.16.0). It was prototyped and
+abandoned after testing: the edge-gateway `liveUpdate` feed does **not** publish song cuts before they
+start airing. Empirically the newest cut in the response is always the *currently-airing* one, and
+widening the request window (`endTimestamp` up to +45 min) surfaced **zero** future song cuts — the
+`items[]` set was identical. So there is no usable song-level lookahead to source "up next" from
+(`liveUpdate`'s ahead-of-broadcast schedule applies to `episodes[]`/show blocks, not the cut layer).
+Reviving this needs a genuine forward song-schedule/EPG endpoint; none was found. The host-side
+`ILiveUpNextProvider` consumer (badge annotation) remains ready for a future implementer.
 
 ## Live-stream handling
 
