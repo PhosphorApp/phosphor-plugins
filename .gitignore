@@ -61,3 +61,7 @@ Phosphor/Visuals/EmojiRenderer.cs
 
 # Plugin self-deploy output (PHOSPHOR_HOST_DIR unset)
 dist/
+
+# Local NuGet feed config (machine-specific: local abstractions feed)
+nuget.config
+
