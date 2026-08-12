@@ -20,6 +20,13 @@ public sealed class SiriusXmSource :
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
+
+    // Streaming path selector. FALSE (default) = edge-gateway tuneSource (bearer) — the goal: 100% off
+    // legacy APIs. TRUE = legacy cookie player.siriusxm.com path (kept for manual rollback only). During
+    // testing this is deliberately false and the edge path FORCE-FAILS with no fallback, so any gateway
+    // streaming problem is obvious rather than silently masked by the old path.
+    private const bool UseLegacyStreaming = false;
+
     private string _username = "";
     private string _password = "";
     private string _region = SiriusXmSourceProvider.RegionUs;
@@ -28,6 +35,11 @@ public sealed class SiriusXmSource :
 
     private SxmClient? _client;
     private SxmProxy? _proxy;
+    // Edge-gateway client (bearer/JWT) — now powers BOTH now-playing (liveUpdate) and live streaming
+    // (tuneSource + key). The cookie-based SxmClient/SxmProxy above are the LEGACY path, kept only for
+    // the channel lineup today and gated OFF for streaming via UseLegacyStreaming.
+    private SxmEdgeClient? _edgeClient;
+    private SxmEdgeProxy? _edgeProxy;
     private IReadOnlyList<SxmChannel>? _channels;
 
     // Favorited channel ids (loaded lazily from the instance dir).
@@ -73,12 +85,15 @@ public sealed class SiriusXmSource :
         lock (_gate)
         {
             _client = null;
+            _edgeClient = null;
             _channels = null;
             if (newPort != _proxyPort)
             {
                 _proxyPort = newPort;
                 _proxy?.Dispose();
                 _proxy = null;
+                _edgeProxy?.Dispose();
+                _edgeProxy = null;
             }
         }
     }
@@ -92,7 +107,9 @@ public sealed class SiriusXmSource :
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            var client = new SxmClient(_username, _password, _region, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s));
+            // Edge gateway (bearer) — same path used for lineup/now-playing/streaming. No legacy cookie.
+            var cacheDir = _host?.InstanceCacheDirectory ?? Path.GetTempPath();
+            using var client = new SxmEdgeClient(_username, _password, _region, cacheDir, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s));
             if (!await client.AuthenticateAsync(ct))
                 return new ConnectionTestResult(false, "Login failed — check username/password.", sw.Elapsed);
             var channels = await client.GetChannelsAsync(ct);
@@ -525,11 +542,27 @@ public sealed class SiriusXmSource :
             ?? (await EnsureChannelsAsync(ct)).FirstOrDefault(c => c.Id == item.ItemId);
         if (channel == null) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: channel '{item.ItemId}' not found."); return null; }
 
-        var client = await EnsureClientAsync(ct);
-        if (client == null) return null;
+        string? localUrl;
+#pragma warning disable CS0162 // UseLegacyStreaming is a compile-time rollback switch; one branch is intentionally unreachable.
+        if (UseLegacyStreaming)
+        {
+            // LEGACY cookie path (manual rollback only).
+            var client = await EnsureClientAsync(ct);
+            if (client == null) return null;
+            var proxy = EnsureProxy(client);
+            localUrl = await proxy.SetChannelAsync(channel, ct);
+        }
+        else
+        {
+            // EDGE-GATEWAY path (default). Force-fail — NO fallback to legacy — so gateway streaming
+            // problems surface instead of being masked.
+            var edge = await EnsureEdgeClientAsync(ct);
+            if (edge == null) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, "SXM: edge auth failed; not resolving stream (no legacy fallback)."); return null; }
+            var proxy = EnsureEdgeProxy(edge);
+            localUrl = await proxy.SetChannelAsync(channel, ct);
+        }
+#pragma warning restore CS0162
 
-        var proxy = EnsureProxy(client);
-        var localUrl = await proxy.SetChannelAsync(channel, ct);
         if (localUrl == null) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: failed to resolve stream for '{channel.Id}'."); return null; }
 
         return new ResolvedStream(
@@ -549,8 +582,10 @@ public sealed class SiriusXmSource :
 
     /// <summary>
     /// Returns the currently-airing track for a playing channel, polled by the host while the live
-    /// stream plays. Resolves the channel from <paramref name="itemId"/> and reuses the authenticated
-    /// client; returns null (no update) on any failure so the host simply keeps the last title.
+    /// stream plays. Routes through <see cref="SxmEdgeClient"/> — the SiriusXM edge-gateway
+    /// <c>liveUpdate</c> feed (bearer/JWT auth) that publishes the schedule ahead of broadcast, so the
+    /// selected cut matches the audio. Returns null (no update) on any failure so the host keeps the
+    /// last title.
     /// </summary>
     public async Task<LiveNowPlaying?> GetNowPlayingAsync(string itemId, TimeSpan? playbackPosition, CancellationToken ct = default)
     {
@@ -559,17 +594,17 @@ public sealed class SiriusXmSource :
             var channel = (await EnsureChannelsAsync(ct)).FirstOrDefault(c => c.Id == itemId);
             if (channel == null) return null;
 
-            var client = await EnsureClientAsync(ct);
-            if (client == null) return null;
+            var edge = await EnsureEdgeClientAsync(ct);
+            if (edge == null) return null;
 
-            var np = await client.GetNowPlayingAsync(channel, playbackPosition, ct);
+            var np = await edge.GetNowPlayingAsync(channel, playbackPosition, ct);
             if (np == null) return null;
             return new LiveNowPlaying(np.Title, np.Artist, np.Album, np.NextChangeUtc);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, $"SXM now-playing failed: {ex.Message}");
+            Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, $"SXM np failed: {ex.Message}");
             return null;
         }
     }
@@ -588,11 +623,11 @@ public sealed class SiriusXmSource :
         progress?.Report(new RefreshProgress(-1, "Fetching SiriusXM channel lineup…"));
         try
         {
-            var client = await EnsureClientAsync(ct);
-            if (client == null)
+            var edge = await EnsureEdgeClientAsync(ct);
+            if (edge == null)
                 return new RefreshResult(false, 0, "Sign-in failed — check your username, password, and region.");
 
-            var channels = await client.GetChannelsAsync(ct);
+            var channels = await edge.GetChannelsAsync(ct);
             if (channels.Count == 0)
                 return new RefreshResult(false, 0, "No channels returned by SiriusXM.");
 
@@ -626,6 +661,26 @@ public sealed class SiriusXmSource :
         return client;
     }
 
+    /// <summary>
+    /// Lazily builds the edge-gateway (bearer/JWT) client used for now-playing. Token caches
+    /// (device/tokens/access.json) live under the instance cache dir, isolated from the shipping
+    /// plug-in. Returns null when credentials are missing or the initial login fails.
+    /// </summary>
+    private async Task<SxmEdgeClient?> EnsureEdgeClientAsync(CancellationToken ct)
+    {
+        SxmEdgeClient? edge;
+        lock (_gate) edge = _edgeClient;
+        if (edge != null) return edge;
+
+        if (!IsConfigured) return null;
+        var cacheDir = _host?.InstanceCacheDirectory ?? Path.GetTempPath();
+        edge = new SxmEdgeClient(_username, _password, _region, cacheDir,
+            s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s));
+        if (!await edge.AuthenticateAsync(ct)) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, "SXM: edge-gateway authentication failed."); return null; }
+        lock (_gate) _edgeClient = edge;
+        return edge;
+    }
+
     private async Task<IReadOnlyList<SxmChannel>> EnsureChannelsAsync(CancellationToken ct)
     {
         lock (_gate) { if (_channels != null) return _channels; }
@@ -639,9 +694,9 @@ public sealed class SiriusXmSource :
             return cached;
         }
 
-        var client = await EnsureClientAsync(ct);
-        if (client == null) return [];
-        var channels = await client.GetChannelsAsync(ct);
+        var edge = await EnsureEdgeClientAsync(ct);
+        if (edge == null) return [];
+        var channels = await edge.GetChannelsAsync(ct);
         if (channels.Count > 0)
         {
             lock (_gate) _channels = channels;
@@ -683,7 +738,9 @@ public sealed class SiriusXmSource :
     }
 
     // Bump when the SxmChannel shape changes so old caches are rejected (tester-only: no migration).
-    private const int LineupCacheVersion = 2;
+    // v3: lineup now comes from the edge gateway (UUID ids/guids, genre categories) — reject old
+    // cookie-lineup caches (slug ids) so browse/now-playing use the new UUID-keyed channels.
+    private const int LineupCacheVersion = 3;
     private sealed record LineupCache(int Version, DateTimeOffset FetchedUtc, IReadOnlyList<SxmChannel> Channels);
 
     private SxmProxy EnsureProxy(SxmClient client)
@@ -697,13 +754,28 @@ public sealed class SiriusXmSource :
         }
     }
 
+    private SxmEdgeProxy EnsureEdgeProxy(SxmEdgeClient edge)
+    {
+        lock (_gate)
+        {
+            if (_edgeProxy is { IsRunning: true }) return _edgeProxy;
+            _edgeProxy = new SxmEdgeProxy(edge, _proxyPort, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s));
+            _edgeProxy.Start();
+            return _edgeProxy;
+        }
+    }
+
     /// <summary>Releases the local HLS proxy (frees its port) when the host rebuilds/tears down the
     /// source — otherwise the HttpListener lingers and the next instance can't bind the port.</summary>
     public void Dispose()
     {
         SxmProxy? proxy;
-        lock (_gate) { proxy = _proxy; _proxy = null; }
+        SxmEdgeProxy? edgeProxy;
+        SxmEdgeClient? edge;
+        lock (_gate) { proxy = _proxy; _proxy = null; edgeProxy = _edgeProxy; _edgeProxy = null; edge = _edgeClient; _edgeClient = null; }
         try { proxy?.Dispose(); } catch { /* best-effort */ }
+        try { edgeProxy?.Dispose(); } catch { /* best-effort */ }
+        try { edge?.Dispose(); } catch { /* best-effort */ }
     }
 
     private void Log(Phosphor.Plugin.Abstractions.LogLevel level, string message) =>

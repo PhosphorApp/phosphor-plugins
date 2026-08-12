@@ -1,14 +1,18 @@
 {
   "Music": [
-    "rock", "pop", "country", "hiphop", "world", "canadianmusic", "discovery", "dance",
-    "jazz", "chill", "00s", "70s", "90s", "hits", "50s60s", "80s", "10s", "global",
-    "christian", "party", "workout"
+    "rock", "pop", "hip-hop", "country", "danceelectronic", "latin", "newageambient",
+    "international", "classical", "jazz", "r&b", "christian", "alternativeindie",
+    "standards", "reggae", "holiday", "folk",
+    "world", "canadianmusic", "discovery", "dance", "chill", "00s", "70s", "90s",
+    "hits", "50s60s", "80s", "10s", "global", "party", "workout"
   ],
   "Talk": [
-    "entertainment", "publicradio", "comedy", "moretalk", "political", "canadiantalk",
-    "religion", "howardstern", "kids"
+    "newspolitics", "comedy", "societyculture", "popculture", "business", "familykids",
+    "religion", "truecrime", "healthwellness", "lifestylehealth", "fictiondrama",
+    "entertainment", "publicradio", "moretalk", "political", "canadiantalk", "howardstern", "kids"
   ],
   "Sports": [
-    "sportsplay", "nflplay", "mlbpbp", "NHL_PBP", "NBA_PBP", "sportstalk", "college"
+    "sportsrecreation", "livegames", "sportstalk",
+    "sportsplay", "nflplay", "mlbpbp", "nhl_pbp", "nba_pbp", "college"
   ]
 }

@@ -7,11 +7,17 @@
 	from the host back to this project. It references ONLY the Phosphor plug-in contract,
 	compile-only (the host supplies the single shared runtime copy).
 
-	Playback design (PROXY STYLE B): the plug-in runs a tiny local HLS proxy. It passes the SXM
-	variant playlist through, rewrites the EXT-X-KEY URI to a local endpoint that serves the
-	static AES-128 key, and injects the SXM auth token params onto segment requests. LibVLC then
-	fetches + AES-decrypts the segments itself. The host plays the local http://127.0.0.1 URL via
-	its existing StreamUrl -> new Media -> Play path (no ffmpeg in the playback path).
+	As of 1.1.0 the plug-in runs on the SiriusXM EDGE-GATEWAY API (api.edge-gateway.siriusxm.com)
+	with bearer-token (JWT) auth for auth, channel lineup, now-playing (liveUpdate) and live streaming
+	(tuneSource + key) — see SxmEdgeClient / SxmEdgeProxy. The legacy cookie player.siriusxm.com path
+	(SxmClient / SxmProxy) is retained as a compile-time fallback behind SiriusXmSource.UseLegacyStreaming
+	(default off).
+
+	Playback design (PROXY STYLE B): the plug-in runs a tiny local HLS proxy. It resolves the SXM
+	variant playlist, rewrites the EXT-X-KEY URI to a local endpoint that serves the AES-128 key, and
+	rewrites segment URIs to local endpoints. LibVLC then fetches + AES-decrypts the segments itself.
+	The host plays the local http://127.0.0.1 URL via its existing StreamUrl -> new Media -> Play path
+	(no ffmpeg in the playback path).
   -->
   <PropertyGroup>
 	<TargetFramework>net8.0</TargetFramework>
@@ -19,7 +25,7 @@
 	<ImplicitUsings>enable</ImplicitUsings>
 	<AssemblyName>Phosphor.Plugins.SiriusXM</AssemblyName>
 	<RootNamespace>Phosphor.Plugins.SiriusXM</RootNamespace>
-	<Version>1.0.1</Version>
+	<Version>1.1.0</Version>
 	<IsPackable>false</IsPackable>
 	<EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>

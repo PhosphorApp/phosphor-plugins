@@ -21,23 +21,35 @@ public sealed class SxmCategoryMap
 
     private const string MapFileName = "categories.json";
 
-    // Fallback seed (used if no categories.json is found), from the real 37-category taxonomy.
+    // Fallback seed (used if no categories.json is found). Keyed on the EDGE-GATEWAY genre slugs
+    // (genre lowercased, " & " and spaces removed) so the Exp plugin groups correctly even without the
+    // bundled json. Old cookie-lineup keys are kept too so a legacy build still works.
     private static readonly Dictionary<string, string[]> Seed = new()
     {
         [SuperMusic] =
         [
-            "rock", "pop", "country", "hiphop", "world", "canadianmusic", "discovery", "dance",
-            "jazz", "chill", "00s", "70s", "90s", "hits", "50s60s", "80s", "10s", "global",
-            "christian", "party", "workout",
+            // edge-gateway genres
+            "rock", "pop", "hip-hop", "country", "danceelectronic", "latin", "newageambient",
+            "international", "classical", "jazz", "r&b", "christian", "alternativeindie",
+            "standards", "reggae", "holiday", "folk",
+            // legacy cookie keys
+            "world", "canadianmusic", "discovery", "dance", "chill", "00s", "70s", "90s", "hits",
+            "50s60s", "80s", "10s", "global", "party", "workout",
         ],
         [SuperTalk] =
         [
-            "entertainment", "publicradio", "comedy", "moretalk", "political", "canadiantalk",
-            "religion", "howardstern", "kids",
+            // edge-gateway genres
+            "newspolitics", "comedy", "societyculture", "popculture", "business", "familykids",
+            "religion", "truecrime", "healthwellness", "lifestylehealth", "fictiondrama",
+            // legacy cookie keys
+            "entertainment", "publicradio", "moretalk", "political", "canadiantalk", "howardstern", "kids",
         ],
         [SuperSports] =
         [
-            "sportsplay", "nflplay", "mlbpbp", "NHL_PBP", "NBA_PBP", "sportstalk", "college",
+            // edge-gateway genres
+            "sportsrecreation", "livegames", "sportstalk",
+            // legacy cookie keys
+            "sportsplay", "nflplay", "mlbpbp", "nhl_pbp", "nba_pbp", "college",
         ],
     };
 
@@ -56,10 +68,19 @@ public sealed class SxmCategoryMap
     public static SxmCategoryMap Load(string? userDir, Action<string>? log = null)
     {
         // 1) user override in the instance cache dir
-        var groups = TryLoadFile(userDir, log) ?? TryLoadFile(AppContext.BaseDirectory, log);
+        // 2) the bundled categories.json next to THIS plug-in assembly. Use the assembly location, NOT
+        //    AppContext.BaseDirectory — for a dynamically-loaded plug-in the latter is the HOST exe dir,
+        //    so the bundled file (in plugins/<Name>/) would never be found and we'd silently fall back
+        //    to Seed (symptom: only the genres that happen to match Seed keys show up).
+        var groups = TryLoadFile(userDir, log) ?? TryLoadFile(PluginDirectory, log);
         if (groups != null) return new SxmCategoryMap(groups);
         return new SxmCategoryMap(Seed);
     }
+
+    // Directory containing this plug-in assembly (where the bundled categories.json is deployed).
+    private static string? PluginDirectory =>
+        Path.GetDirectoryName(typeof(SxmCategoryMap).Assembly.Location) is { Length: > 0 } d
+            ? d : AppContext.BaseDirectory;
 
     private static Dictionary<string, string[]>? TryLoadFile(string? dir, Action<string>? log)
     {
