@@ -23,6 +23,19 @@
 	changed. SkipUnchangedFiles is false so that, once the target runs, it always overwrites (a plug-in
 	DLL keeps its version, so a timestamp-only change would otherwise be skipped).
   -->
+  <!--
+	Pin FileVersion to each plug-in's own <Version> (e.g. SiriusXM 1.1.0) so the host's About tab —
+	which reads FileVersion — shows the real per-plug-in version. This is deliberate because the
+	release build passes -p:AssemblyVersion=1.0.0 (a fixed ALC binding identity that must not churn):
+	MSBuild's default chain is FileVersion -> AssemblyVersion -> Version, so pinning AssemblyVersion
+	would otherwise drag FileVersion down to 1.0.0 and mask the plug-in's true version. Set in
+	Directory.Build.targets (imported after the project body) so $(Version) is already resolved.
+	Only fills in when the build didn't pass an explicit -p:FileVersion.
+  -->
+  <PropertyGroup Condition="$(MSBuildProjectName.StartsWith('Phosphor.Plugins.')) And '$(FileVersion)' == ''">
+	<FileVersion>$(Version)</FileVersion>
+  </PropertyGroup>
+
   <PropertyGroup Condition="$(MSBuildProjectName.StartsWith('Phosphor.Plugins.'))">
 	<PhosphorPluginName>$(MSBuildProjectName.Substring(17))</PhosphorPluginName>
 	<PhosphorDeployRoot Condition="'$(PHOSPHOR_HOST_DIR)' != ''">$(PHOSPHOR_HOST_DIR)</PhosphorDeployRoot>
