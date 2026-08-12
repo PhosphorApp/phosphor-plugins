@@ -6,7 +6,7 @@ Loaded dynamically from the host's `plugins/SiriusXM/` folder; references only
 
 ## Status
 
-**v1.1.0** — runs entirely on the SiriusXM **edge-gateway API**
+**v1.2.1** — runs entirely on the SiriusXM **edge-gateway API**
 (`api.edge-gateway.siriusxm.com`) with **bearer-token (JWT)** auth. Auth, channel lineup, now-playing,
 and live streaming are all off the deprecated cookie `player.siriusxm.com` path. The legacy cookie
 code is retained as a compile-time fallback only (see **Legacy fallback**).
@@ -122,12 +122,30 @@ Plug-ins tab → add **SiriusXM** → set **Username** / **Password** (Secret) /
 **Test connection**. Credentials are `Secret` settings; enable the app's DPAPI "encrypt secrets"
 option to protect them at rest. **Proxy port** (default `8912`) sets the local HLS proxy's port —
 change it only if another app already uses that port; the running proxy rebinds when you save a new value.
+**Use legacy streaming (fallback)** (default OFF) is an advanced/diagnostic toggle — see below.
+
+## Streaming resilience
+
+The `tuneSource` master/segment URLs are **pre-signed and short-lived** (~5 min). To avoid the
+"audio stops but the now-playing timer keeps running" symptom (LibVLC still requesting segments while
+the signed window has lapsed), `SxmEdgeProxy`:
+
+- **Proactively re-resolves** a fresh window ~30s before the signed URL's embedded expiry (parsed from
+  the `_<start>-<end>_` epoch in the URL; falls back to a ~4-min interval if absent).
+- **Recovers on segment failure:** after a couple of consecutive segment fetch failures it re-resolves
+  the window (debounced by a short cooldown) and retries the segment once, so audio recovers instead of
+  going to dead air. Failures log `SXM edge proxy: segment '<name>' failed (CDN <status>) …`.
+- **Survives content-key rotation:** the AES-128 key cache is TTL'd (5 min) and cleared on every window
+  re-resolve, so a rotated key is re-fetched rather than decrypting to silence.
+- Bounds the segment-name→URL map (last ~200) so long sessions don't grow memory.
 
 ## Legacy fallback
 
-The original cookie `player.siriusxm.com` implementation (`SxmClient` / `SxmProxy`) is retained but
-gated OFF behind the compile-time `SiriusXmSource.UseLegacyStreaming` (default `false`). It exists
-purely for manual rollback; when the edge path is fully trusted it (and the flag) can be deleted.
+The original cookie `player.siriusxm.com` streaming path (`SxmClient` / `SxmProxy`) is retained as a
+diagnostic fallback, exposed as the **Use legacy streaming (fallback)** setting (default OFF). Turn it
+ON only if edge-gateway playback fails and you need a temporary workaround; auth, the channel lineup,
+and now-playing always use the gateway regardless. Changing the setting rebinds the proxy on the next
+resolve. When the edge path is fully trusted, the legacy path (and this setting) can be removed.
 
 ## Upgrade note (v1.0.x → v1.1.0)
 

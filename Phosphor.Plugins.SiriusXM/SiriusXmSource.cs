@@ -21,11 +21,11 @@ public sealed class SiriusXmSource :
     private readonly object _gate = new();
     private IPluginHost? _host;
 
-    // Streaming path selector. FALSE (default) = edge-gateway tuneSource (bearer) — the goal: 100% off
-    // legacy APIs. TRUE = legacy cookie player.siriusxm.com path (kept for manual rollback only). During
-    // testing this is deliberately false and the edge path FORCE-FAILS with no fallback, so any gateway
-    // streaming problem is obvious rather than silently masked by the old path.
-    private const bool UseLegacyStreaming = false;
+    // Streaming path selector, backed by the "useLegacyStreaming" setting (default false). false =
+    // edge-gateway tuneSource (bearer). true = legacy cookie player.siriusxm.com path — a diagnostic
+    // fallback for when gateway playback fails. Now-playing and the channel lineup always use the
+    // gateway regardless. Changing it tears down the running proxy so the next resolve uses the choice.
+    private bool _useLegacyStreaming;
 
     private string _username = "";
     private string _password = "";
@@ -35,9 +35,9 @@ public sealed class SiriusXmSource :
 
     private SxmClient? _client;
     private SxmProxy? _proxy;
-    // Edge-gateway client (bearer/JWT) — now powers BOTH now-playing (liveUpdate) and live streaming
-    // (tuneSource + key). The cookie-based SxmClient/SxmProxy above are the LEGACY path, kept only for
-    // the channel lineup today and gated OFF for streaming via UseLegacyStreaming.
+    // Edge-gateway client (bearer/JWT) — now powers auth, lineup, now-playing (liveUpdate) and live
+    // streaming (tuneSource + key). The cookie-based SxmClient/SxmProxy are the LEGACY streaming path,
+    // used only when the "useLegacyStreaming" setting is on.
     private SxmEdgeClient? _edgeClient;
     private SxmEdgeProxy? _edgeProxy;
     private IReadOnlyList<SxmChannel>? _channels;
@@ -80,16 +80,20 @@ public sealed class SiriusXmSource :
         var newPort = int.TryParse(Get(values, SiriusXmSourceProvider.KeyProxyPort), out var p) && p is > 0 and <= 65535
             ? p : SiriusXmSourceProvider.DefaultProxyPort;
 
+        var newUseLegacy = bool.TryParse(Get(values, SiriusXmSourceProvider.KeyUseLegacyStreaming), out var ul) && ul;
+
         // Credentials changed — drop any live client/lineup so the next use re-authenticates. If the
-        // port changed, tear down the running proxy so it rebinds on the new port next resolve.
+        // port OR the streaming path changed, tear down the running proxies so the next resolve rebinds
+        // on the new port / uses the chosen path.
         lock (_gate)
         {
             _client = null;
             _edgeClient = null;
             _channels = null;
-            if (newPort != _proxyPort)
+            if (newPort != _proxyPort || newUseLegacy != _useLegacyStreaming)
             {
                 _proxyPort = newPort;
+                _useLegacyStreaming = newUseLegacy;
                 _proxy?.Dispose();
                 _proxy = null;
                 _edgeProxy?.Dispose();
@@ -543,10 +547,11 @@ public sealed class SiriusXmSource :
         if (channel == null) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: channel '{item.ItemId}' not found."); return null; }
 
         string? localUrl;
-#pragma warning disable CS0162 // UseLegacyStreaming is a compile-time rollback switch; one branch is intentionally unreachable.
-        if (UseLegacyStreaming)
+        bool useLegacy;
+        lock (_gate) useLegacy = _useLegacyStreaming;
+        if (useLegacy)
         {
-            // LEGACY cookie path (manual rollback only).
+            // LEGACY cookie path — diagnostic fallback (setting "useLegacyStreaming").
             var client = await EnsureClientAsync(ct);
             if (client == null) return null;
             var proxy = EnsureProxy(client);
@@ -554,14 +559,13 @@ public sealed class SiriusXmSource :
         }
         else
         {
-            // EDGE-GATEWAY path (default). Force-fail — NO fallback to legacy — so gateway streaming
-            // problems surface instead of being masked.
+            // EDGE-GATEWAY path (default). Force-fail — NO silent fallback to legacy — so gateway
+            // streaming problems surface (and the setting lets a user opt into the fallback explicitly).
             var edge = await EnsureEdgeClientAsync(ct);
             if (edge == null) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, "SXM: edge auth failed; not resolving stream (no legacy fallback)."); return null; }
             var proxy = EnsureEdgeProxy(edge);
             localUrl = await proxy.SetChannelAsync(channel, ct);
         }
-#pragma warning restore CS0162
 
         if (localUrl == null) { Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: failed to resolve stream for '{channel.Id}'."); return null; }
 

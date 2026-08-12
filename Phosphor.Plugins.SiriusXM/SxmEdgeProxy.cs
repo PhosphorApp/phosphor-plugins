@@ -39,8 +39,24 @@ public sealed class SxmEdgeProxy : IDisposable
     // runs. Serving a short filename and looking the URL up here avoids that entirely.
     private readonly Dictionary<string, string> _segUrlByName = new(StringComparer.Ordinal);
 
-    // Cache of fetched AES-128 keys by GUID (served from the local /key/{guid} endpoint).
-    private readonly Dictionary<string, byte[]> _keyCache = new(StringComparer.OrdinalIgnoreCase);
+    // Bound the seg-name map on long sessions: keep insertion order and evict the oldest beyond the cap.
+    private readonly Queue<string> _segOrder = new();
+    private const int MaxSegEntries = 200;
+
+    // Cache of fetched AES-128 keys by GUID with a TTL, so a mid-session content-key rotation (cached
+    // key would silently decrypt to garbage/silence) is recovered when the entry expires or the window
+    // is re-resolved.
+    private readonly Dictionary<string, (byte[] key, DateTimeOffset fetchedUtc)> _keyCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan KeyTtl = TimeSpan.FromMinutes(5);
+
+    // Streaming-resilience state. Pre-signed tuneSource URLs expire (~5 min); when a segment fetch
+    // starts failing we re-resolve a fresh window, and we also refresh PROACTIVELY just before the
+    // signed URL lapses. Both are debounced by _lastResolveUtc so a burst triggers a single re-resolve.
+    private DateTimeOffset _lastResolveUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _windowExpiryUtc = DateTimeOffset.MaxValue;
+    private int _consecutiveSegFailures;
+    private static readonly TimeSpan ResolveCooldown = TimeSpan.FromSeconds(5);
+    private const int SegFailuresBeforeReresolve = 2;
 
     public int Port { get; private set; }
     public bool IsRunning { get; private set; }
@@ -147,8 +163,44 @@ public sealed class SxmEdgeProxy : IDisposable
         {
             _variantUrl = variantAbs;
             _variantBase = new Uri(_variantUrl);
+            _lastResolveUtc = DateTimeOffset.UtcNow;
+            _windowExpiryUtc = ParseSignedUrlExpiry(variantAbs) ?? DateTimeOffset.UtcNow.AddMinutes(4);
+            _consecutiveSegFailures = 0;
+            // A fresh window may carry a rotated content key — drop the cache so keys are re-fetched.
+            _keyCache.Clear();
         }
         return true;
+    }
+
+    // Pre-signed CDN URLs embed a validity window as "_<startEpoch>-<endEpoch>_" in the path (seconds).
+    // Return the end as a UTC instant so we can refresh proactively before it lapses; null if absent.
+    private static DateTimeOffset? ParseSignedUrlExpiry(string url)
+    {
+        try
+        {
+            var m = Regex.Match(url, @"_(\d{9,})-(\d{9,})_");
+            if (m.Success && long.TryParse(m.Groups[2].Value, out var endEpoch))
+                return DateTimeOffset.FromUnixTimeSeconds(endEpoch);
+        }
+        catch { }
+        return null;
+    }
+
+    // Debounced window re-resolve: mints a fresh signed URL/window via tuneSource. Returns true if a
+    // re-resolve actually ran (respecting the cooldown), so callers can retry the failed fetch once.
+    private async Task<bool> TryReresolveAsync(string reason)
+    {
+        SxmChannel? channel;
+        lock (_gate)
+        {
+            if (DateTimeOffset.UtcNow - _lastResolveUtc < ResolveCooldown) return false;
+            channel = _channel;
+            // Optimistically set so concurrent segment handlers don't all pile in.
+            _lastResolveUtc = DateTimeOffset.UtcNow;
+        }
+        if (channel == null) return false;
+        _log?.Invoke($"SXM edge proxy: re-resolving window ({reason}).");
+        return await ResolveVariantAsync(channel, CancellationToken.None);
     }
 
     private async Task LoopAsync(CancellationToken ct)
@@ -192,12 +244,38 @@ public sealed class SxmEdgeProxy : IDisposable
                 lock (_gate) _segUrlByName.TryGetValue(name, out segUrl);
                 if (segUrl == null)
                 {
-                    _log?.Invoke($"SXM edge proxy: unknown segment '{name}'.");
+                    // Unknown segment: the window likely advanced/rotated. Re-resolve so the map
+                    // repopulates, then retry the lookup once.
+                    _log?.Invoke($"SXM edge proxy: unknown segment '{name}' — re-resolving.");
+                    if (await TryReresolveAsync("unknown segment"))
+                        lock (_gate) _segUrlByName.TryGetValue(name, out segUrl);
+                }
+
+                if (segUrl == null)
+                {
                     await WriteBytesAsync(ctx, Array.Empty<byte>(), "audio/aac", 404);
                 }
                 else
                 {
-                    var bytes = await FetchCdnBytesAsync(segUrl);
+                    var (bytes, status) = await FetchCdnBytesAsync(segUrl);
+                    if (bytes == null)
+                    {
+                        // A failing segment usually means the pre-signed window expired. Log the status,
+                        // and after a couple of consecutive failures re-resolve a fresh window and retry
+                        // this segment once so audio recovers instead of going to dead air.
+                        int fails; lock (_gate) fails = ++_consecutiveSegFailures;
+                        _log?.Invoke($"SXM edge proxy: segment '{name}' failed (CDN {status}), consecutiveFailures={fails}.");
+                        if (fails >= SegFailuresBeforeReresolve && await TryReresolveAsync($"segment CDN {status}"))
+                        {
+                            string? fresh;
+                            lock (_gate) _segUrlByName.TryGetValue(name, out fresh);
+                            if (fresh != null) (bytes, status) = await FetchCdnBytesAsync(fresh);
+                        }
+                    }
+                    else
+                    {
+                        lock (_gate) _consecutiveSegFailures = 0;
+                    }
                     await WriteBytesAsync(ctx, bytes ?? Array.Empty<byte>(),
                         "audio/aac", bytes == null ? 502 : 200);
                 }
@@ -218,7 +296,16 @@ public sealed class SxmEdgeProxy : IDisposable
     {
         string variantUrl;
         SxmChannel? channel;
-        lock (_gate) { variantUrl = _variantUrl; channel = _channel; }
+        DateTimeOffset expiry;
+        lock (_gate) { variantUrl = _variantUrl; channel = _channel; expiry = _windowExpiryUtc; }
+
+        // Proactive refresh: re-resolve just BEFORE the pre-signed window lapses so segments never
+        // start failing mid-playback (the "dead air, timer running" symptom).
+        if (channel != null && DateTimeOffset.UtcNow >= expiry - TimeSpan.FromSeconds(30))
+        {
+            if (await TryReresolveAsync("window expiring"))
+                lock (_gate) variantUrl = _variantUrl;
+        }
 
         if (string.IsNullOrEmpty(variantUrl) && channel != null)
         {
@@ -292,7 +379,7 @@ public sealed class SxmEdgeProxy : IDisposable
             {
                 var abs = new Uri(baseUri, line).ToString();
                 var name = SegKeyFor(abs);
-                lock (_gate) _segUrlByName[name] = abs;
+                lock (_gate) RegisterSegment(name, abs);
                 outLine = "seg/" + name;
                 isSegment = true;
             }
@@ -337,11 +424,32 @@ public sealed class SxmEdgeProxy : IDisposable
         return string.IsNullOrEmpty(name) ? Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(Encoding.UTF8.GetBytes(url)))[..16] : name;
     }
 
+    // Registers a segment name→URL under the gate (caller holds _gate). Evicts the oldest entries
+    // beyond MaxSegEntries so a long session doesn't grow the map unbounded.
+    private void RegisterSegment(string name, string url)
+    {
+        if (!_segUrlByName.ContainsKey(name)) _segOrder.Enqueue(name);
+        _segUrlByName[name] = url;
+        while (_segOrder.Count > MaxSegEntries)
+        {
+            var old = _segOrder.Dequeue();
+            // Only drop if it wasn't re-registered more recently (kept in the queue once per insert).
+            if (!_segOrder.Contains(old)) _segUrlByName.Remove(old);
+        }
+    }
+
     private async Task<byte[]?> GetKeyAsync(string guid)
     {
-        lock (_gate) { if (_keyCache.TryGetValue(guid, out var cached)) return cached; }
+        lock (_gate)
+        {
+            if (_keyCache.TryGetValue(guid, out var cached))
+            {
+                if (DateTimeOffset.UtcNow - cached.fetchedUtc < KeyTtl) return cached.key;
+                _keyCache.Remove(guid); // expired — re-fetch (handles mid-session key rotation)
+            }
+        }
         var key = await _edge.GetKeyAsync(guid);
-        if (key != null) lock (_gate) _keyCache[guid] = key;
+        if (key != null) lock (_gate) _keyCache[guid] = (key, DateTimeOffset.UtcNow);
         return key;
     }
 
@@ -358,15 +466,14 @@ public sealed class SxmEdgeProxy : IDisposable
         return await r.Content.ReadAsStringAsync();
     }
 
-    private async Task<byte[]?> FetchCdnBytesAsync(string url)
+    // Returns (bytes, status). bytes is null on failure; status is the HTTP code (or 0 if no response)
+    // so callers can log/branch on expiry (403) vs. transient 5xx.
+    private async Task<(byte[]? bytes, int status)> FetchCdnBytesAsync(string url)
     {
         using var r = await _edge.GetCdnAsync(url);
-        if (r == null || !r.IsSuccessStatusCode)
-        {
-            if (r != null) _log?.Invoke($"SXM edge proxy: CDN {(int)r.StatusCode} for segment.");
-            return null;
-        }
-        return await r.Content.ReadAsByteArrayAsync();
+        if (r == null) return (null, 0);
+        if (!r.IsSuccessStatusCode) return (null, (int)r.StatusCode);
+        return (await r.Content.ReadAsByteArrayAsync(), (int)r.StatusCode);
     }
 
     // ── HTTP write helpers ──────────────────────────────────────────────────────

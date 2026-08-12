@@ -22,6 +22,9 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
     /// <summary>Settings key: local HLS proxy port.</summary>
     public const string KeyProxyPort = "proxyPort";
 
+    /// <summary>Settings key: use the legacy cookie streaming path instead of the edge gateway.</summary>
+    public const string KeyUseLegacyStreaming = "useLegacyStreaming";
+
     public const string RegionUs = "US";
     public const string RegionCa = "CA";
 
@@ -61,6 +64,10 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
         new(KeyProxyPort, "Proxy port", PluginSettingType.Number, DefaultValue: DefaultProxyPort.ToString(),
             HelpText: "Local port for the built-in HLS proxy that feeds the player. " +
                       "Change only if another app already uses this port."),
+        new(KeyUseLegacyStreaming, "Use legacy streaming (fallback)", PluginSettingType.Bool, DefaultValue: "false",
+            HelpText: "Advanced/diagnostic: stream via the older SiriusXM cookie path instead of the " +
+                      "edge-gateway API. Leave OFF unless edge-gateway playback fails and you need a " +
+                      "temporary workaround. Now-playing and the channel lineup always use the gateway."),
     ];
 
     public IPhosphorSource CreateInstance(string instanceId, IReadOnlyDictionary<string, string?> settings)
