@@ -6,7 +6,7 @@
   { "Name": "Country", "Icon": "🤠", "SearchTerm": "playlist:country music videos", "SortOrder": 4 },
   { "Name": "Metal", "Icon": "🤘", "SearchTerm": "playlist:heavy metal music videos", "SortOrder": 5 },
   { "Name": "Electronic", "Icon": "🎹", "SearchTerm": "playlist:EDM music videos", "SortOrder": 6 },
-  { "Name": "Concerts", "Icon": "🎪", "SearchTerm": "playlist:full concert live performances min:30m", "SortOrder": 7 },
+  { "Name": "Concerts", "Icon": "🎪", "SearchTerm": "full concert live performances min:30m", "SortOrder": 7 },
   { "Name": "'80s", "Icon": "📼", "SearchTerm": "playlist:music hits from the 80s", "SortOrder": 8 },
   { "Name": "'90s", "Icon": "💿", "SearchTerm": "playlist:music hits from the 90s", "SortOrder": 9 },
   { "Name": "2000s", "Icon": "🔥", "SearchTerm": "playlist:music hits from the 2000s", "SortOrder": 10 },
