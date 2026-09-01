@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.SiriusXM;
 /// suppresses seek/duration and never auto-advances.
 /// </remarks>
 public sealed class SiriusXmSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver, IConnectionTestable, IFavoritable, IHideable, IRefreshable, ILiveNowPlayingProvider, IReplayableById, IDisposable
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver, IConnectionTestable, IFavoritable, IFavoriteMetadataRefresh, IHideable, IRefreshable, ILiveNowPlayingProvider, IReplayableById, IDisposable
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
@@ -396,7 +396,14 @@ public sealed class SiriusXmSource :
         lock (_gate) return _favorites.ToArray();
     }
 
-    /// <summary>Rebuilds a playable channel item from its id, using the cached lineup.</summary>
+    /// <summary>
+    /// Rebuilds a playable channel item from its id. Prefers the cached lineup for rich metadata
+    /// (name/number/artwork), but — like <see cref="RebuildPlayable"/> — falls back to a minimal
+    /// id-only item when the lineup isn't loaded yet (cold start) or the on-disk cache has expired.
+    /// Returning the minimal item lets <see cref="ResolveAsync"/> load the lineup (authenticated
+    /// edge fetch) and resolve from the id, so favorites play on a fresh launch without first having
+    /// to browse the SiriusXM catalog.
+    /// </summary>
     public SourceItem? GetFavorite(string itemId)
     {
         if (string.IsNullOrEmpty(itemId)) return null;
@@ -404,7 +411,45 @@ public sealed class SiriusXmSource :
         lock (_gate) channels = _channels;
         channels ??= LoadLineupCache();
         var ch = channels?.FirstOrDefault(c => c.Id == itemId);
-        return ch is null ? null : ToSourceItem(ch);
+        if (ch is not null) return ToSourceItem(ch);
+
+        // Not in cache (cold start / expired lineup cache) — a minimal item is enough for
+        // ResolveAsync, which loads the lineup and resolves the channel from ItemId alone.
+        return new SourceItem
+        {
+            SourceInstanceId = InstanceId,
+            ItemId = itemId,
+            Title = itemId,
+            Subtitle = "SiriusXM",
+            IsAudioOnly = true,
+            IsLiveStream = true,
+        };
+    }
+
+    // ── IFavoriteMetadataRefresh ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Refreshes a favorited channel's display metadata (name/number/artwork) by loading the lineup —
+    /// from the on-disk cache when fresh, else an authenticated edge fetch. Backs the host's
+    /// "heal stale favorites on open" pass so a channel favorited long ago (and never browsed since)
+    /// shows its real name instead of the raw channel id. Returns null on failure (offline/auth) so
+    /// the host keeps whatever record it already had.
+    /// </summary>
+    public async Task<SourceItem?> RefreshFavoriteAsync(string itemId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(itemId)) return null;
+        try
+        {
+            var channels = await EnsureChannelsAsync(ct);
+            var ch = channels.FirstOrDefault(c => c.Id == itemId);
+            return ch is null ? null : ToSourceItem(ch);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            Log(Phosphor.Plugin.Abstractions.LogLevel.Warning, $"SXM: favorite refresh failed for '{itemId}': {ex.Message}");
+            return null;
+        }
     }
 
     private string FavoritesPath =>
