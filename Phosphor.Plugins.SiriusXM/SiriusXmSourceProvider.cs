@@ -25,6 +25,8 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
     /// <summary>Settings key: use the legacy cookie streaming path instead of the edge gateway.</summary>
     public const string KeyUseLegacyStreaming = "useLegacyStreaming";
 
+    /// <summary>Settings key: how many ~10s segments to stay behind live (network-blip cushion).</summary>
+    public const string KeyLiveDelaySegments = "liveDelaySegments";
     public const string RegionUs = "US";
     public const string RegionCa = "CA";
 
@@ -64,6 +66,11 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
         new(KeyProxyPort, "Proxy port", PluginSettingType.Number, DefaultValue: DefaultProxyPort.ToString(),
             HelpText: "Local port for the built-in HLS proxy that feeds the player. " +
                       "Change only if another app already uses this port."),
+        new(KeyLiveDelaySegments, "Live delay (segments)", PluginSettingType.Number,
+            DefaultValue: SxmEdgeProxy.DefaultLiveDelaySegments.ToString(),
+            HelpText: "How far behind live to play, in ~10 second segments (0-8). Higher values give a " +
+                      "buffer that rides out network hiccups and dropouts; lower values reduce latency. " +
+                      "Default 3 (~30s) suits music. Use 0 for live sports/news."),
         new(KeyUseLegacyStreaming, "Use legacy streaming (fallback)", PluginSettingType.Bool, DefaultValue: "false",
             HelpText: "Advanced/diagnostic: stream via the older SiriusXM cookie path instead of the " +
                       "edge-gateway API. Leave OFF unless edge-gateway playback fails and you need a " +

@@ -32,6 +32,7 @@ public sealed class SiriusXmSource :
     private string _region = SiriusXmSourceProvider.RegionUs;
     // Local HLS proxy port (configurable; defaults to SiriusXmSourceProvider.DefaultProxyPort).
     private int _proxyPort = SiriusXmSourceProvider.DefaultProxyPort;
+    private int _liveDelaySegments = SxmEdgeProxy.DefaultLiveDelaySegments;
 
     private SxmClient? _client;
     private SxmProxy? _proxy;
@@ -81,6 +82,8 @@ public sealed class SiriusXmSource :
             ? p : SiriusXmSourceProvider.DefaultProxyPort;
 
         var newUseLegacy = bool.TryParse(Get(values, SiriusXmSourceProvider.KeyUseLegacyStreaming), out var ul) && ul;
+        var newDelay = int.TryParse(Get(values, SiriusXmSourceProvider.KeyLiveDelaySegments), out var ld)
+            ? Math.Clamp(ld, 0, SxmEdgeProxy.MaxLiveDelaySegments) : SxmEdgeProxy.DefaultLiveDelaySegments;
 
         // Credentials changed — drop any live client/lineup so the next use re-authenticates. If the
         // port OR the streaming path changed, tear down the running proxies so the next resolve rebinds
@@ -90,6 +93,8 @@ public sealed class SiriusXmSource :
             _client = null;
             _edgeClient = null;
             _channels = null;
+            _liveDelaySegments = newDelay;
+            if (_edgeProxy != null) _edgeProxy.LiveDelaySegments = newDelay;
             if (newPort != _proxyPort || newUseLegacy != _useLegacyStreaming)
             {
                 _proxyPort = newPort;
@@ -817,7 +822,7 @@ public sealed class SiriusXmSource :
         lock (_gate)
         {
             if (_edgeProxy is { IsRunning: true }) return _edgeProxy;
-            _edgeProxy = new SxmEdgeProxy(edge, _proxyPort, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s));
+            _edgeProxy = new SxmEdgeProxy(edge, _proxyPort, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s), _liveDelaySegments);
             _edgeProxy.Start();
             return _edgeProxy;
         }

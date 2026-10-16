@@ -1,4 +1,5 @@
 using System.Net;
+using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -57,18 +58,47 @@ public sealed class SxmEdgeProxy : IDisposable
     private int _consecutiveSegFailures;
     private static readonly TimeSpan ResolveCooldown = TimeSpan.FromSeconds(5);
     private const int SegFailuresBeforeReresolve = 2;
+    private const int SlowRequestMs = 1000;
+    private string? _lastPlaylistTail;
+    private DateTimeOffset _lastPlaylistAdvanceUtc;
+    private DateTimeOffset _lastStaleLogUtc;
+    private DateTimeOffset _lastSegRequestUtc = DateTimeOffset.MinValue;
+    private long _lastLoggedSeq = -1;
 
     public int Port { get; private set; }
     public bool IsRunning { get; private set; }
 
+    /// <summary>Default number of newest segments withheld from the served playlist (~10s each).</summary>
+    public const int DefaultLiveDelaySegments = 3;
+    public const int MaxLiveDelaySegments = 8;
+
+    private int _liveDelaySegments = DefaultLiveDelaySegments;
+
+    /// <summary>
+    /// Number of newest segments withheld from the served playlist, so the player stays that many
+    /// segments (~10s each) behind live. Gives the player a cushion to ride out network blips; 0 = live edge.
+    /// </summary>
+    public int LiveDelaySegments
+    {
+        get => Volatile.Read(ref _liveDelaySegments);
+        set => Volatile.Write(ref _liveDelaySegments, Math.Clamp(value, 0, MaxLiveDelaySegments));
+    }
+
+    // Last successfully rewritten playlist, served again if a refresh fails so the player can keep
+    // draining its buffer while connectivity recovers.
+    private string? _lastGoodPlaylist;
+    private DateTimeOffset _lastGoodPlaylistUtc;
+    private const int PlaylistFetchAttempts = 2;
+    private static readonly TimeSpan MaxStalePlaylistAge = TimeSpan.FromMinutes(3);
     private readonly int _basePort;
 
-    public SxmEdgeProxy(SxmEdgeClient edge, int port, Action<string>? log = null)
+    public SxmEdgeProxy(SxmEdgeClient edge, int port, Action<string>? log = null, int liveDelaySegments = DefaultLiveDelaySegments)
     {
         _edge = edge;
         Port = port;
         _basePort = port;
         _log = log;
+        LiveDelaySegments = liveDelaySegments;
     }
 
     public void Start()
@@ -106,7 +136,14 @@ public sealed class SxmEdgeProxy : IDisposable
     /// </summary>
     public async Task<string?> SetChannelAsync(SxmChannel channel, CancellationToken ct = default)
     {
-        lock (_gate) _channel = channel;
+        lock (_gate)
+        {
+            _channel = channel;
+            _lastPlaylistTail = null;
+            _lastPlaylistAdvanceUtc = DateTimeOffset.MinValue;
+            _lastStaleLogUtc = DateTimeOffset.MinValue;
+            _lastGoodPlaylist = null;
+        }
         if (!await ResolveVariantAsync(channel, ct)) return null;
 
         // Unique per-channel URL so LibVLC re-opens the stream on a channel switch instead of keeping
@@ -233,20 +270,24 @@ public sealed class SxmEdgeProxy : IDisposable
                 // Style B: LibVLC fetches the key here and decrypts segments itself. The GUID in the
                 // path identifies the gateway content key.
                 var guid = path["/key/".Length..];
+                var keyTimer = Stopwatch.StartNew();
                 var key = await GetKeyAsync(guid);
+                if (key == null || keyTimer.ElapsedMilliseconds >= SlowRequestMs)
+                    _log?.Invoke($"SXM edge proxy: key id={ShortId(guid)} status={(key == null ? 502 : 200)} elapsedMs={keyTimer.ElapsedMilliseconds}.");
                 await WriteBytesAsync(ctx, key ?? Array.Empty<byte>(),
                     "application/octet-stream", key == null ? 502 : 200);
             }
             else if (path.StartsWith("/seg/"))
             {
                 var name = Uri.UnescapeDataString(path["/seg/".Length..]);
+                var segmentId = ShortId(name);
                 string? segUrl;
                 lock (_gate) _segUrlByName.TryGetValue(name, out segUrl);
                 if (segUrl == null)
                 {
                     // Unknown segment: the window likely advanced/rotated. Re-resolve so the map
                     // repopulates, then retry the lookup once.
-                    _log?.Invoke($"SXM edge proxy: unknown segment '{name}' — re-resolving.");
+                    _log?.Invoke($"SXM edge proxy: unknown segment id={segmentId} — re-resolving.");
                     if (await TryReresolveAsync("unknown segment"))
                         lock (_gate) _segUrlByName.TryGetValue(name, out segUrl);
                 }
@@ -257,25 +298,41 @@ public sealed class SxmEdgeProxy : IDisposable
                 }
                 else
                 {
-                    var (bytes, status) = await FetchCdnBytesAsync(segUrl);
+                    var segmentTimer = Stopwatch.StartNew();
+                    var nowUtc = DateTimeOffset.UtcNow;
+                    long sinceLastMs;
+                    lock (_gate)
+                    {
+                        sinceLastMs = _lastSegRequestUtc == DateTimeOffset.MinValue ? -1 : (long)(nowUtc - _lastSegRequestUtc).TotalMilliseconds;
+                        _lastSegRequestUtc = nowUtc;
+                    }
+                    var (bytes, status) = await FetchCdnBytesAsync(segUrl, segmentId);
+                    _log?.Invoke($"SXM edge proxy: segment id={segmentId} status={status} elapsedMs={segmentTimer.ElapsedMilliseconds} bytes={bytes?.Length ?? 0} sinceLastSegReqMs={sinceLastMs}.");
                     if (bytes == null)
                     {
                         // A failing segment usually means the pre-signed window expired. Log the status,
                         // and after a couple of consecutive failures re-resolve a fresh window and retry
                         // this segment once so audio recovers instead of going to dead air.
                         int fails; lock (_gate) fails = ++_consecutiveSegFailures;
-                        _log?.Invoke($"SXM edge proxy: segment '{name}' failed (CDN {status}), consecutiveFailures={fails}.");
+                        _log?.Invoke($"SXM edge proxy: segment id={segmentId} failed CDN={status} elapsedMs={segmentTimer.ElapsedMilliseconds} consecutiveFailures={fails}.");
                         if (fails >= SegFailuresBeforeReresolve && await TryReresolveAsync($"segment CDN {status}"))
                         {
                             string? fresh;
                             lock (_gate) _segUrlByName.TryGetValue(name, out fresh);
-                            if (fresh != null) (bytes, status) = await FetchCdnBytesAsync(fresh);
+                            if (fresh != null)
+                            {
+                                var retryTimer = Stopwatch.StartNew();
+                                (bytes, status) = await FetchCdnBytesAsync(fresh, segmentId);
+                                _log?.Invoke($"SXM edge proxy: segment retry id={segmentId} CDN={status} elapsedMs={retryTimer.ElapsedMilliseconds} success={bytes != null}.");
+                            }
                         }
                     }
                     else
                     {
                         lock (_gate) _consecutiveSegFailures = 0;
                     }
+                    if (bytes != null && segmentTimer.ElapsedMilliseconds >= SlowRequestMs)
+                        _log?.Invoke($"SXM edge proxy: slow segment id={segmentId} CDN={status} elapsedMs={segmentTimer.ElapsedMilliseconds} bytes={bytes.Length}.");
                     await WriteBytesAsync(ctx, bytes ?? Array.Empty<byte>(),
                         "audio/aac", bytes == null ? 502 : 200);
                 }
@@ -293,6 +350,51 @@ public sealed class SxmEdgeProxy : IDisposable
     // Serve the current variant playlist; re-resolve a fresh window when missing or stale (pre-signed
     // URLs expire, and SXM's live variant snapshot stops advancing after a couple of minutes).
     private async Task<string> GetVariantBodyAsync()
+    {
+        try
+        {
+            var body = await BuildVariantBodyAsync();
+            if (HasSegments(body))
+            {
+                lock (_gate) { _lastGoodPlaylist = body; _lastGoodPlaylistUtc = DateTimeOffset.UtcNow; }
+                return body;
+            }
+            return ServeLastGood("refresh produced no segments") ?? body;
+        }
+        catch (Exception ex)
+        {
+            var stale = ServeLastGood($"refresh threw {ex.GetType().Name}: {ex.Message}");
+            if (stale != null) return stale;
+            throw;
+        }
+    }
+
+    // Returns the last good playlist (if recent enough) so the player keeps draining its buffer
+    // while the proxy retries; null when there is nothing usable.
+    private string? ServeLastGood(string reason)
+    {
+        string? body; DateTimeOffset at;
+        lock (_gate) { body = _lastGoodPlaylist; at = _lastGoodPlaylistUtc; }
+        if (body == null) return null;
+        var age = DateTimeOffset.UtcNow - at;
+        if (age > MaxStalePlaylistAge) return null;
+        _log?.Invoke($"SXM edge proxy: serving last good playlist ageSec={age.TotalSeconds:F0} ({reason}).");
+        return body;
+    }
+
+    private async Task<string?> FetchPlaylistWithRetryAsync(string url)
+    {
+        for (var attempt = 1; attempt <= PlaylistFetchAttempts; attempt++)
+        {
+            var raw = await FetchCdnStringAsync(url);
+            if (raw != null) return raw;
+            _log?.Invoke($"SXM edge proxy: playlist fetch attempt={attempt} failed.");
+            if (attempt < PlaylistFetchAttempts) await Task.Delay(300 * attempt);
+        }
+        return null;
+    }
+
+    private async Task<string> BuildVariantBodyAsync()
     {
         string variantUrl;
         SxmChannel? channel;
@@ -314,17 +416,68 @@ public sealed class SxmEdgeProxy : IDisposable
         }
         if (string.IsNullOrEmpty(variantUrl)) return "#EXTM3U\n";
 
-        var raw = await FetchCdnStringAsync(variantUrl);
+        var playlistTimer = Stopwatch.StartNew();
+        var raw = await FetchPlaylistWithRetryAsync(variantUrl);
         if ((raw == null || !HasSegments(raw)) && channel != null &&
             await ResolveVariantAsync(channel, CancellationToken.None))
         {
             lock (_gate) variantUrl = _variantUrl;
-            raw = await FetchCdnStringAsync(variantUrl);
+            raw = await FetchPlaylistWithRetryAsync(variantUrl);
         }
         var rewritten = RewriteVariant(raw ?? "");
-        _log?.Invoke($"SXM edge proxy: served variant rawLen={raw?.Length ?? 0} segs={(raw != null ? CountSegments(raw) : 0)} outLen={rewritten.Length}");
+        if (playlistTimer.ElapsedMilliseconds >= SlowRequestMs || raw == null)
+            _log?.Invoke($"SXM edge proxy: playlist fetch elapsedMs={playlistTimer.ElapsedMilliseconds} success={raw != null}.");
+        LogPlaylistProgress(rewritten, raw);
         return rewritten;
     }
+
+    private void LogPlaylistProgress(string rewritten, string? raw)
+    {
+        if (raw == null || !HasSegments(rewritten))
+        {
+            _log?.Invoke("SXM edge proxy: served empty media playlist.");
+            return;
+        }
+
+        string? tail = null;
+        string? sequence = null;
+        foreach (var line in rewritten.Split('\n'))
+        {
+            if (line.StartsWith("#EXT-X-MEDIA-SEQUENCE:", StringComparison.Ordinal))
+                sequence = line["#EXT-X-MEDIA-SEQUENCE:".Length..].Trim();
+            else if (line.StartsWith("seg/", StringComparison.Ordinal))
+                tail = line["seg/".Length..].Trim();
+        }
+        if (tail == null) return;
+
+        var now = DateTimeOffset.UtcNow;
+        string? message = null;
+        lock (_gate)
+        {
+            if (_lastPlaylistTail != tail)
+            {
+                _lastPlaylistTail = tail;
+                _lastPlaylistAdvanceUtc = now;
+                var delta = "";
+                if (long.TryParse(sequence, out var seqNum))
+                {
+                    if (_lastLoggedSeq >= 0) delta = $" delta={seqNum - _lastLoggedSeq}";
+                    _lastLoggedSeq = seqNum;
+                }
+                message = $"playlist advanced seq={sequence ?? "?"}{delta} tail={ShortId(tail)} segments={CountSegments(rewritten)}";
+            }
+            else if (now - _lastPlaylistAdvanceUtc >= TimeSpan.FromSeconds(30) &&
+                     now - _lastStaleLogUtc >= TimeSpan.FromSeconds(30))
+            {
+                _lastStaleLogUtc = now;
+                message = $"playlist unchanged for {(now - _lastPlaylistAdvanceUtc).TotalSeconds:F0}s seq={sequence ?? "?"} tail={ShortId(tail)}";
+            }
+        }
+        if (message != null) _log?.Invoke($"SXM edge proxy: {message}.");
+    }
+
+    private static string ShortId(string value) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(value)))[..12];
 
     private static int CountSegments(string text) => text.Split('\n')
         .Count(l => { var t = l.TrimEnd('\r'); return t.Length > 0 && !t.StartsWith('#'); });
@@ -400,15 +553,17 @@ public sealed class SxmEdgeProxy : IDisposable
             }
         }
 
-        // Keep only the last LiveWindowSegments blocks; bump the media sequence past the dropped ones.
-        int drop = Math.Max(0, blocks.Count - LiveWindowSegments);
+        // Withhold the newest LiveDelaySegments blocks (live-edge cushion), then keep the last
+        // LiveWindowSegments of what remains; bump the media sequence past the dropped leading ones.
+        int end = Math.Max(Math.Min(blocks.Count, 1), blocks.Count - LiveDelaySegments);
+        int drop = Math.Max(0, end - LiveWindowSegments);
         long outSeq = haveMediaSequence ? mediaSequence + drop : 0;
 
         var sb = new StringBuilder();
         foreach (var h in headerLines) sb.Append(h).Append('\n');
         if (haveMediaSequence || drop > 0) sb.Append("#EXT-X-MEDIA-SEQUENCE:").Append(outSeq).Append('\n');
-        for (int i = drop; i < blocks.Count; i++) sb.Append(blocks[i]);
-        if (pending.Length > 0) sb.Append(pending);
+        for (int i = drop; i < end; i++) sb.Append(blocks[i]);
+        if (pending.Length > 0 && LiveDelaySegments == 0) sb.Append(pending);
         return sb.ToString();
     }
 
@@ -468,13 +623,37 @@ public sealed class SxmEdgeProxy : IDisposable
 
     // Returns (bytes, status). bytes is null on failure; status is the HTTP code (or 0 if no response)
     // so callers can log/branch on expiry (403) vs. transient 5xx.
-    private async Task<(byte[]? bytes, int status)> FetchCdnBytesAsync(string url)
+    private async Task<(byte[]? bytes, int status)> FetchCdnBytesAsync(string url, string tag = "")
     {
-        using var r = await _edge.GetCdnAsync(url);
-        if (r == null) return (null, 0);
-        if (!r.IsSuccessStatusCode) return (null, (int)r.StatusCode);
-        return (await r.Content.ReadAsByteArrayAsync(), (int)r.StatusCode);
+        (byte[]? bytes, int status) result = (null, 0);
+        for (var attempt = 1; attempt <= SegFetchAttempts; attempt++)
+        {
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                using var r = await _edge.GetCdnAsync(url);
+                if (r == null) result = (null, 0);
+                else if (!r.IsSuccessStatusCode) result = (null, (int)r.StatusCode);
+                else result = (await r.Content.ReadAsByteArrayAsync(), (int)r.StatusCode);
+            }
+            catch (Exception ex)
+            {
+                result = (null, 0);
+                _log?.Invoke($"SXM edge proxy: segment id={tag} attempt={attempt} exception={ex.GetType().Name}: {ex.Message}");
+            }
+            if (result.bytes != null)
+            {
+                if (attempt > 1) _log?.Invoke($"SXM edge proxy: segment id={tag} recovered on attempt={attempt} ms={sw.ElapsedMilliseconds}.");
+                break;
+            }
+            _log?.Invoke($"SXM edge proxy: segment id={tag} attempt={attempt} failed status={result.status} ms={sw.ElapsedMilliseconds}.");
+            if (result.status is 403 or 404 or 410) break; // not transient; re-resolve path handles it
+            if (attempt < SegFetchAttempts) await Task.Delay(150 * attempt);
+        }
+        return result;
     }
+
+    private const int SegFetchAttempts = 3;
 
     // ── HTTP write helpers ──────────────────────────────────────────────────────
 

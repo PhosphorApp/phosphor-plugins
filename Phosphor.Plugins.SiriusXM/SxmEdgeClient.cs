@@ -84,7 +84,15 @@ public sealed class SxmEdgeClient : IDisposable
         _region = string.IsNullOrWhiteSpace(region) ? "US" : region;
         _log = log;
         _http = new HttpClient { BaseAddress = new Uri(BaseAddress), Timeout = TimeSpan.FromSeconds(60) };
-        _cdn = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        // Retire pooled connections before the CDN edge silently closes them (a stale keep-alive socket
+        // between ~10s segment fetches causes stalls/failures), and fail fast so the proxy can retry.
+        var cdnHandler = new SocketsHttpHandler
+        {
+            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(4),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            ConnectTimeout = TimeSpan.FromSeconds(5),
+        };
+        _cdn = new HttpClient(cdnHandler) { Timeout = TimeSpan.FromSeconds(8) };
 
         _deviceFile = Path.Combine(cacheDir, "device.json");
         _tokensFile = Path.Combine(cacheDir, "tokens.json");
@@ -235,8 +243,8 @@ public sealed class SxmEdgeClient : IDisposable
     public async Task<HttpResponseMessage?> GetCdnAsync(string url, CancellationToken ct = default)
     {
         try { return await _cdn.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct); }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex) { _log?.Invoke($"SXM: CDN GET failed: {ex.Message}"); return null; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { _log?.Invoke($"SXM: CDN GET failed ({ex.GetType().Name}): {ex.Message}"); return null; }
     }
 
 
