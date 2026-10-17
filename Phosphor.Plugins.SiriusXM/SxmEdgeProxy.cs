@@ -63,6 +63,15 @@ public sealed class SxmEdgeProxy : IDisposable
     private DateTimeOffset _lastPlaylistAdvanceUtc;
     private DateTimeOffset _lastStaleLogUtc;
     private DateTimeOffset _lastSegRequestUtc = DateTimeOffset.MinValue;
+
+    // Per-segment content metadata from the CDN playlist (#EXT-X-PROGRAM-DATE-TIME and #EXTINF), keyed by
+    // the short segment name, so each segment request can be logged with the broadcast time it carries.
+    private readonly Dictionary<string, (string? pdt, double dur)> _segMeta = new(StringComparer.Ordinal);
+    private double _segmentDurationMs = 10000;
+
+    /// <summary>Most recently observed segment duration (ms) from the playlist; 10000 until one is seen.</summary>
+    public double SegmentDurationMs => Volatile.Read(ref _segmentDurationMs);
+    private DateTimeOffset _lastPlaylistRequestUtc = DateTimeOffset.MinValue;
     private long _lastLoggedSeq = -1;
 
     public int Port { get; private set; }
@@ -263,7 +272,27 @@ public sealed class SxmEdgeProxy : IDisposable
             }
             else if (path.EndsWith("variant.m3u8"))
             {
-                await WriteTextAsync(ctx, await GetVariantBodyAsync(), "application/vnd.apple.mpegurl");
+                var reqTimer = Stopwatch.StartNew();
+                var reqNow = DateTimeOffset.UtcNow;
+                long sincePlaylistMs;
+                lock (_gate)
+                {
+                    sincePlaylistMs = _lastPlaylistRequestUtc == DateTimeOffset.MinValue ? -1 : (long)(reqNow - _lastPlaylistRequestUtc).TotalMilliseconds;
+                    _lastPlaylistRequestUtc = reqNow;
+                }
+                var body = await GetVariantBodyAsync();
+                var buildMs = reqTimer.ElapsedMilliseconds;
+                var writeTimer = Stopwatch.StartNew();
+                try
+                {
+                    await WriteTextAsync(ctx, body, "application/vnd.apple.mpegurl");
+                }
+                catch (Exception wex)
+                {
+                    _log?.Invoke($"SXM edge proxy: playlist write to player failed after {writeTimer.ElapsedMilliseconds}ms: {wex.GetType().Name}: {wex.Message}");
+                    throw;
+                }
+                _log?.Invoke($"SXM edge proxy: playlist req sinceLastPlaylistReqMs={sincePlaylistMs} buildMs={buildMs} writeMs={writeTimer.ElapsedMilliseconds} segments={CountSegments(body)} {LastPlaylistDiag}");
             }
             else if (path.StartsWith("/key/"))
             {
@@ -307,7 +336,9 @@ public sealed class SxmEdgeProxy : IDisposable
                         _lastSegRequestUtc = nowUtc;
                     }
                     var (bytes, status) = await FetchCdnBytesAsync(segUrl, segmentId);
-                    _log?.Invoke($"SXM edge proxy: segment id={segmentId} status={status} elapsedMs={segmentTimer.ElapsedMilliseconds} bytes={bytes?.Length ?? 0} sinceLastSegReqMs={sinceLastMs}.");
+                    string? segPdt = null; double segDur = 0;
+                    lock (_gate) { if (_segMeta.TryGetValue(name, out var meta)) { segPdt = meta.pdt; segDur = meta.dur; } }
+                    _log?.Invoke($"SXM edge proxy: segment id={segmentId} status={status} elapsedMs={segmentTimer.ElapsedMilliseconds} bytes={bytes?.Length ?? 0} sinceLastSegReqMs={sinceLastMs} contentTime={segPdt ?? "-"} dur={segDur:F2}s.");
                     if (bytes == null)
                     {
                         // A failing segment usually means the pre-signed window expired. Log the status,
@@ -333,8 +364,19 @@ public sealed class SxmEdgeProxy : IDisposable
                     }
                     if (bytes != null && segmentTimer.ElapsedMilliseconds >= SlowRequestMs)
                         _log?.Invoke($"SXM edge proxy: slow segment id={segmentId} CDN={status} elapsedMs={segmentTimer.ElapsedMilliseconds} bytes={bytes.Length}.");
-                    await WriteBytesAsync(ctx, bytes ?? Array.Empty<byte>(),
-                        "audio/aac", bytes == null ? 502 : 200);
+                    var writeSegTimer = Stopwatch.StartNew();
+                    try
+                    {
+                        await WriteBytesAsync(ctx, bytes ?? Array.Empty<byte>(),
+                            "audio/aac", bytes == null ? 502 : 200);
+                    }
+                    catch (Exception wex)
+                    {
+                        _log?.Invoke($"SXM edge proxy: segment write to player failed id={segmentId} after {writeSegTimer.ElapsedMilliseconds}ms: {wex.GetType().Name}: {wex.Message}");
+                        throw;
+                    }
+                    if (writeSegTimer.ElapsedMilliseconds >= 500)
+                        _log?.Invoke($"SXM edge proxy: slow segment write to player id={segmentId} writeMs={writeSegTimer.ElapsedMilliseconds}.");
                 }
             }
             else ctx.Response.StatusCode = 404;
@@ -425,10 +467,36 @@ public sealed class SxmEdgeProxy : IDisposable
             raw = await FetchPlaylistWithRetryAsync(variantUrl);
         }
         var rewritten = RewriteVariant(raw ?? "");
+        LastPlaylistDiag = DescribeCdnPlaylist(raw, playlistTimer.ElapsedMilliseconds);
         if (playlistTimer.ElapsedMilliseconds >= SlowRequestMs || raw == null)
             _log?.Invoke($"SXM edge proxy: playlist fetch elapsedMs={playlistTimer.ElapsedMilliseconds} success={raw != null}.");
         LogPlaylistProgress(rewritten, raw);
         return rewritten;
+    }
+
+    // Diagnostics for the most recent playlist build: the CDN's own view (full media sequence, segment
+    // count, newest segment id) and whether it changed since the previous request. Distinguishes a CDN
+    // that stopped publishing from a player that stopped polling.
+    private volatile string _lastPlaylistDiag = "";
+    private string LastPlaylistDiag { get => _lastPlaylistDiag; set => _lastPlaylistDiag = value; }
+    private string? _lastCdnTail;
+
+    private string DescribeCdnPlaylist(string? raw, long fetchMs)
+    {
+        if (raw == null) return $"cdn=null fetchMs={fetchMs}";
+        long seq = -1; string? tail = null; int count = 0;
+        foreach (var lineRaw in raw.Split('\n'))
+        {
+            var line = lineRaw.TrimEnd('\r');
+            if (line.StartsWith("#EXT-X-MEDIA-SEQUENCE:", StringComparison.Ordinal))
+                long.TryParse(line["#EXT-X-MEDIA-SEQUENCE:".Length..].Trim(), out seq);
+            else if (line.Length > 0 && !line.StartsWith('#')) { tail = line; count++; }
+        }
+        var cdnEnd = seq >= 0 ? seq + count - 1 : -1;
+        var tailId = tail == null ? "-" : ShortId(SegKeyFor(tail));
+        bool changed;
+        lock (_gate) { changed = _lastCdnTail != tailId; _lastCdnTail = tailId; }
+        return $"cdnNewestSeq={cdnEnd} cdnTail={tailId} cdnChanged={changed} fetchMs={fetchMs}";
     }
 
     private void LogPlaylistProgress(string rewritten, string? raw)
@@ -505,6 +573,8 @@ public sealed class SxmEdgeProxy : IDisposable
         bool seenFirstSegment = false;
         long mediaSequence = 0;
         bool haveMediaSequence = false;
+        string? pendingPdt = null;
+        double pendingDur = 0;
 
         foreach (var lineRaw in text.Split('\n'))
         {
@@ -512,6 +582,17 @@ public sealed class SxmEdgeProxy : IDisposable
             if (line.StartsWith("#EXT-X-ENDLIST", StringComparison.Ordinal) ||
                 line.StartsWith("#EXT-X-PLAYLIST-TYPE", StringComparison.Ordinal))
                 continue;
+
+            if (line.StartsWith("#EXT-X-PROGRAM-DATE-TIME:", StringComparison.Ordinal))
+                pendingPdt = line["#EXT-X-PROGRAM-DATE-TIME:".Length..].Trim();
+            else if (line.StartsWith("#EXTINF:", StringComparison.Ordinal))
+            {
+                var durText = line["#EXTINF:".Length..];
+                var comma = durText.IndexOf(',');
+                if (comma >= 0) durText = durText[..comma];
+                double.TryParse(durText, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out pendingDur);
+            }
 
             if (line.StartsWith("#EXT-X-MEDIA-SEQUENCE:", StringComparison.Ordinal))
             {
@@ -532,7 +613,10 @@ public sealed class SxmEdgeProxy : IDisposable
             {
                 var abs = new Uri(baseUri, line).ToString();
                 var name = SegKeyFor(abs);
-                lock (_gate) RegisterSegment(name, abs);
+                lock (_gate) RegisterSegment(name, abs, pendingPdt, pendingDur);
+                if (pendingDur > 0) Volatile.Write(ref _segmentDurationMs, pendingDur * 1000.0);
+                pendingPdt = null;
+                pendingDur = 0;
                 outLine = "seg/" + name;
                 isSegment = true;
             }
@@ -581,15 +665,16 @@ public sealed class SxmEdgeProxy : IDisposable
 
     // Registers a segment name→URL under the gate (caller holds _gate). Evicts the oldest entries
     // beyond MaxSegEntries so a long session doesn't grow the map unbounded.
-    private void RegisterSegment(string name, string url)
+    private void RegisterSegment(string name, string url, string? pdt = null, double dur = 0)
     {
         if (!_segUrlByName.ContainsKey(name)) _segOrder.Enqueue(name);
         _segUrlByName[name] = url;
+        if (pdt != null || dur > 0) _segMeta[name] = (pdt, dur);
         while (_segOrder.Count > MaxSegEntries)
         {
             var old = _segOrder.Dequeue();
             // Only drop if it wasn't re-registered more recently (kept in the queue once per insert).
-            if (!_segOrder.Contains(old)) _segUrlByName.Remove(old);
+            if (!_segOrder.Contains(old)) { _segUrlByName.Remove(old); _segMeta.Remove(old); }
         }
     }
 

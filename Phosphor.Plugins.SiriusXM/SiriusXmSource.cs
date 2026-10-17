@@ -651,6 +651,13 @@ public sealed class SiriusXmSource :
             var edge = await EnsureEdgeClientAsync(ct);
             if (edge == null) return null;
 
+            // The proxy holds playback behind live by liveDelaySegments segments; tell now-playing so the
+            // label follows the audio actually heard rather than running ahead by the hold-back.
+            SxmEdgeProxy? runningProxy;
+            lock (_gate) runningProxy = _edgeProxy;
+            edge.ExtraLagMs = runningProxy is { IsRunning: true }
+                ? (long)(runningProxy.LiveDelaySegments * runningProxy.SegmentDurationMs) : 0;
+
             var np = await edge.GetNowPlayingAsync(channel, playbackPosition, ct);
             if (np == null) return null;
             return new LiveNowPlaying(np.Title, np.Artist, np.Album, np.NextChangeUtc);

@@ -46,6 +46,16 @@ public sealed class SxmEdgeClient : IDisposable
     // observable here — see docs\SIRIUSXM_NOWPLAYING.md ("Dynamic lag") for why a constant is used.
     private const long LiveAudioLagMs = 30000;
 
+    // Additional lag (ms) on top of LiveAudioLagMs, set by the source from the proxy's live-delay
+    // hold-back (liveDelaySegments x segment duration): the proxy withholds the newest segments, so the
+    // audio trails real time by that much more than the baseline.
+    private long _extraLagMs;
+    public long ExtraLagMs
+    {
+        get => Interlocked.Read(ref _extraLagMs);
+        set => Interlocked.Exchange(ref _extraLagMs, Math.Max(0, value));
+    }
+
     private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
 
     private readonly string _username;
@@ -125,7 +135,7 @@ public sealed class SxmEdgeClient : IDisposable
     {
         var r = await FetchLiveUpdateAsync(channel, ct);
         if (r is not { } root) return null;
-        return ExtractNowPlaying(root, playbackPosition, _log);
+        return ExtractNowPlaying(root, playbackPosition, _log, LiveAudioLagMs + ExtraLagMs);
     }
 
     // Shared liveUpdate POST used by now-playing: resolves the channelId and requests the schedule
@@ -250,14 +260,14 @@ public sealed class SxmEdgeClient : IDisposable
 
     // ── liveUpdate parsing (SONG-cut selection + diagnostics) ───────────────────
 
-    private static SxmNowPlaying? ExtractNowPlaying(JsonElement root, TimeSpan? playbackPosition, Action<string>? log)
+    private static SxmNowPlaying? ExtractNowPlaying(JsonElement root, TimeSpan? playbackPosition, Action<string>? log, long lagMs)
     {
         try
         {
             // The instant the listener is actually hearing. The edge feed runs AHEAD of broadcast, so
             // anchoring at (now - a small buffer) lands on the airing cut. Tune LiveAudioLagMs from the
             // diagnostics if the label leads/trails the audio.
-            long audioInstant = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - LiveAudioLagMs;
+            long audioInstant = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - lagMs;
             _ = playbackPosition; // retained in the API for sources that can use a true session origin.
 
             if (!root.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
@@ -305,7 +315,7 @@ public sealed class SxmEdgeClient : IDisposable
                 // timestamp, but the listener hears that boundary LiveAudioLagMs later, so shift it
                 // forward so the host's next poll (and the label flip) fires when the change is heard.
                 DateTimeOffset? next = bestEnd > audioInstant
-                    ? DateTimeOffset.FromUnixTimeMilliseconds(bestEnd + LiveAudioLagMs) : null;
+                    ? DateTimeOffset.FromUnixTimeMilliseconds(bestEnd + lagMs) : null;
 
                 if (log != null)
                 {
@@ -314,7 +324,7 @@ public sealed class SxmEdgeClient : IDisposable
                     double audioToEnd = (bestEnd - audioInstant) / 1000.0;
                     log($"SXM np: pos={playbackPosition?.TotalSeconds:F0}s audioInstant={F(audioInstant)} " +
                         $"songStart={F(bestStart)} (audio-songStart={songToAudio:F0}s) songEnd={F(bestEnd)} " +
-                        $"(end-audio={audioToEnd:F0}s) => '{artist} - {title}'");
+                        $"(end-audio={audioToEnd:F0}s) lag={lagMs / 1000.0:F0}s => '{artist} - {title}'");
                 }
 
                 if (!string.IsNullOrWhiteSpace(title) || !string.IsNullOrWhiteSpace(artist))
