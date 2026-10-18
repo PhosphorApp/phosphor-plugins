@@ -33,6 +33,8 @@ public sealed class SiriusXmSource :
     // Local HLS proxy port (configurable; defaults to SiriusXmSourceProvider.DefaultProxyPort).
     private int _proxyPort = SiriusXmSourceProvider.DefaultProxyPort;
     private int _liveDelaySegments = SxmEdgeProxy.DefaultLiveDelaySegments;
+    private int _targetDurationOverride;
+    private bool _continuousStream;
 
     private SxmClient? _client;
     private SxmProxy? _proxy;
@@ -84,6 +86,9 @@ public sealed class SiriusXmSource :
         var newUseLegacy = bool.TryParse(Get(values, SiriusXmSourceProvider.KeyUseLegacyStreaming), out var ul) && ul;
         var newDelay = int.TryParse(Get(values, SiriusXmSourceProvider.KeyLiveDelaySegments), out var ld)
             ? Math.Clamp(ld, 0, SxmEdgeProxy.MaxLiveDelaySegments) : SxmEdgeProxy.DefaultLiveDelaySegments;
+        var newTarget = int.TryParse(Get(values, SiriusXmSourceProvider.KeyTargetDurationOverride), out var td)
+            ? Math.Clamp(td, 0, 20) : 0;
+        var newContinuous = bool.TryParse(Get(values, SiriusXmSourceProvider.KeyContinuousStream), out var cs) && cs;
 
         // Credentials changed — drop any live client/lineup so the next use re-authenticates. If the
         // port OR the streaming path changed, tear down the running proxies so the next resolve rebinds
@@ -95,6 +100,10 @@ public sealed class SiriusXmSource :
             _channels = null;
             _liveDelaySegments = newDelay;
             if (_edgeProxy != null) _edgeProxy.LiveDelaySegments = newDelay;
+            _targetDurationOverride = newTarget;
+            if (_edgeProxy != null) _edgeProxy.TargetDurationOverrideSeconds = newTarget;
+            _continuousStream = newContinuous;
+            if (_edgeProxy != null) _edgeProxy.ContinuousMode = newContinuous;
             if (newPort != _proxyPort || newUseLegacy != _useLegacyStreaming)
             {
                 _proxyPort = newPort;
@@ -657,6 +666,7 @@ public sealed class SiriusXmSource :
             lock (_gate) runningProxy = _edgeProxy;
             edge.ExtraLagMs = runningProxy is { IsRunning: true }
                 ? (long)(runningProxy.LiveDelaySegments * runningProxy.SegmentDurationMs) : 0;
+            edge.LagOverrideMs = runningProxy is { IsRunning: true } ? runningProxy.ContinuousStreamLagMs() ?? -1 : -1;
 
             var np = await edge.GetNowPlayingAsync(channel, playbackPosition, ct);
             if (np == null) return null;
@@ -829,7 +839,11 @@ public sealed class SiriusXmSource :
         lock (_gate)
         {
             if (_edgeProxy is { IsRunning: true }) return _edgeProxy;
-            _edgeProxy = new SxmEdgeProxy(edge, _proxyPort, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s), _liveDelaySegments);
+            _edgeProxy = new SxmEdgeProxy(edge, _proxyPort, s => Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, s), _liveDelaySegments)
+                        {
+                            TargetDurationOverrideSeconds = _targetDurationOverride,
+                            ContinuousMode = _continuousStream,
+                        };
             _edgeProxy.Start();
             return _edgeProxy;
         }

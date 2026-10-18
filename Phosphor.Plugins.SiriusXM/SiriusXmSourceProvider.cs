@@ -27,6 +27,12 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
 
     /// <summary>Settings key: how many ~10s segments to stay behind live (network-blip cushion).</summary>
     public const string KeyLiveDelaySegments = "liveDelaySegments";
+
+    /// <summary>Settings key: experimental override of the served HLS target duration (seconds; 0 = off).</summary>
+    public const string KeyTargetDurationOverride = "targetDurationOverride";
+
+    /// <summary>Settings key: experimental continuous (non-HLS) stream mode toggle.</summary>
+    public const string KeyContinuousStream = "continuousStream";
     public const string RegionUs = "US";
     public const string RegionCa = "CA";
 
@@ -71,6 +77,14 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
             HelpText: "How far behind live to play, in ~10 second segments (0-8). Higher values give a " +
                       "buffer that rides out network hiccups and dropouts; lower values reduce latency. " +
                       "Default 3 (~30s) suits music. Use 0 for live sports/news."),
+        new(KeyTargetDurationOverride, "Playlist target duration override (seconds)", PluginSettingType.Number,
+            DefaultValue: "0",
+            HelpText: "Experimental. Makes the player poll the playlist faster, which may avoid a brief audio " +
+                      "glitch about every 3 minutes. 0 = off (default). Try 9. Applies on the next playlist refresh."),
+        new(KeyContinuousStream, "Continuous stream mode (experimental)", PluginSettingType.Bool, DefaultValue: "false",
+            HelpText: "Experimental. Feeds the player one continuous audio stream instead of an HLS playlist, " +
+                      "to avoid brief glitches caused by the player's playlist handling. Takes effect on the " +
+                      "next play. Leave OFF unless testing; switch it off if audio misbehaves."),
         new(KeyUseLegacyStreaming, "Use legacy streaming (fallback)", PluginSettingType.Bool, DefaultValue: "false",
             HelpText: "Advanced/diagnostic: stream via the older SiriusXM cookie path instead of the " +
                       "edge-gateway API. Leave OFF unless edge-gateway playback fails and you need a " +

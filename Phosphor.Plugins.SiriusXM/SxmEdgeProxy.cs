@@ -74,10 +74,50 @@ public sealed class SxmEdgeProxy : IDisposable
     private DateTimeOffset _lastPlaylistRequestUtc = DateTimeOffset.MinValue;
     private long _lastLoggedSeq = -1;
 
+    // Experiment: VLC polls the media playlist at roughly #EXT-X-TARGETDURATION, which on this stream is
+    // slightly slower than the 9.75s segment cadence, so every ~19 polls the playlist jumps by 2 segments
+    // (delta=2) and VLC logs a late-buffer drop. A positive value rewrites the served TARGETDURATION
+    // (seconds) so VLC polls faster; 0 leaves the CDN's value untouched.
+    private int _targetDurationOverride;
+    private volatile bool _headerLogged;
+    public int TargetDurationOverrideSeconds
+    {
+        get => Volatile.Read(ref _targetDurationOverride);
+        set => Volatile.Write(ref _targetDurationOverride, Math.Clamp(value, 0, 20));
+    }
+
     public int Port { get; private set; }
     public bool IsRunning { get; private set; }
 
-    /// <summary>Default number of newest segments withheld from the served playlist (~10s each).</summary>
+    // EXPERIMENTAL: serve one continuous packed-AAC stream (decrypted here) instead of an HLS playlist, so
+    // LibVLC's adaptive/HLS playlist logic is out of the timing path. Off = the normal HLS path.
+    private volatile bool _continuousMode;
+    public bool ContinuousMode
+    {
+        get => _continuousMode;
+        set => _continuousMode = value;
+    }
+    private SxmContinuousSession? _continuous;
+
+    // Allowance (ms) for player start-up latency and publish delay on top of the segments the continuous
+    // stream starts behind live. Calibrated by ear (title ~20s behind with a 60s assumption => ~40s real).
+    private const long ContinuousBaseLagMs = 1000;
+
+    /// <summary>
+    /// How far behind live (ms) the audio now being heard is, when a continuous stream is active; null when
+    /// the HLS path is in use. The stream starts (delay + 1) segments before the live edge's end.
+    /// </summary>
+    public long? ContinuousStreamLagMs()
+    {
+        SxmContinuousSession? s;
+        lock (_gate) s = _continuous;
+        if (s == null) return null;
+        var active = s.ActiveDelaySegments;
+        var segments = (active >= 0 ? active : LiveDelaySegments) + 1;
+        return (long)(segments * s.SegmentMs) + ContinuousBaseLagMs;
+    }
+
+    /// <summary>Default number of newest segments withheld
     public const int DefaultLiveDelaySegments = 3;
     public const int MaxLiveDelaySegments = 8;
 
@@ -155,7 +195,25 @@ public sealed class SxmEdgeProxy : IDisposable
         }
         if (!await ResolveVariantAsync(channel, ct)) return null;
 
-        // Unique per-channel URL so LibVLC re-opens the stream on a channel switch instead of keeping
+        if (ContinuousMode)
+        {
+            SxmContinuousSession? old;
+            var session = new SxmContinuousSession(
+                GetPlaylistForContinuousAsync,
+                (url, tag) => FetchCdnBytesAsync(url, tag),
+                GetKeyAsync,
+                reason => TryReresolveAsync(reason),
+                () => LiveDelaySegments,
+                _log);
+            lock (_gate) { old = _continuous; _continuous = session; }
+            old?.Dispose();
+            session.Start();
+            _log?.Invoke("SXM edge proxy: CONTINUOUS stream mode (experimental) - serving /stream.aac instead of HLS.");
+            return $"http://127.0.0.1:{Port}/stream.aac?ch={Uri.EscapeDataString(channel.Id)}&t={DateTimeOffset.UtcNow.Ticks}";
+        }
+        lock (_gate) { _continuous?.Dispose(); _continuous = null; }
+
+        // Unique per-channel URL so LibVLC re-opens the stream
         // the previous channel's buffered audio (the local master URL is otherwise identical).
         return $"http://127.0.0.1:{Port}/master.m3u8?ch={Uri.EscapeDataString(channel.Id)}&t={DateTimeOffset.UtcNow.Ticks}";
     }
@@ -212,7 +270,8 @@ public sealed class SxmEdgeProxy : IDisposable
             _lastResolveUtc = DateTimeOffset.UtcNow;
             _windowExpiryUtc = ParseSignedUrlExpiry(variantAbs) ?? DateTimeOffset.UtcNow.AddMinutes(4);
             _consecutiveSegFailures = 0;
-            // A fresh window may carry a rotated content key — drop the cache so keys are re-fetched.
+            _headerLogged = false;
+            // A fresh window may carry a rotated content key
             _keyCache.Clear();
         }
         return true;
@@ -269,6 +328,25 @@ public sealed class SxmEdgeProxy : IDisposable
             {
                 await WriteTextAsync(ctx, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=256000\nvariant.m3u8\n",
                     "application/vnd.apple.mpegurl");
+            }
+            else if (path.EndsWith("stream.aac"))
+            {
+                SxmContinuousSession? session;
+                lock (_gate) session = _continuous;
+                if (session == null) { ctx.Response.StatusCode = 404; }
+                else if (!await session.WaitReadyAsync(CancellationToken.None))
+                {
+                    _log?.Invoke("SXM continuous: session not ready; returning 503.");
+                    ctx.Response.StatusCode = 503;
+                }
+                else
+                {
+                    ctx.Response.StatusCode = 200;
+                    ctx.Response.ContentType = "audio/aac";
+                    ctx.Response.SendChunked = true;
+                    ctx.Response.KeepAlive = false;
+                    await session.ServeAsync(ctx.Response.OutputStream, CancellationToken.None);
+                }
             }
             else if (path.EndsWith("variant.m3u8"))
             {
@@ -424,6 +502,31 @@ public sealed class SxmEdgeProxy : IDisposable
         return body;
     }
 
+    // Raw CDN media playlist (with retry) plus the base URI for resolving relative segment URLs. Used by the
+    // experimental continuous session; re-resolves the signed window when the playlist can't be fetched.
+    private async Task<(string? raw, Uri? baseUri)> GetPlaylistForContinuousAsync()
+    {
+        string variantUrl;
+        SxmChannel? channel;
+        DateTimeOffset expiry;
+        lock (_gate) { variantUrl = _variantUrl; channel = _channel; expiry = _windowExpiryUtc; }
+        if (channel != null && DateTimeOffset.UtcNow >= expiry - TimeSpan.FromSeconds(30) &&
+            await TryReresolveAsync("window expiring (continuous)"))
+            lock (_gate) variantUrl = _variantUrl;
+        if (string.IsNullOrEmpty(variantUrl)) return (null, null);
+
+        var raw = await FetchPlaylistWithRetryAsync(variantUrl);
+        if ((raw == null || !HasSegments(raw)) && channel != null &&
+            await ResolveVariantAsync(channel, CancellationToken.None))
+        {
+            lock (_gate) variantUrl = _variantUrl;
+            raw = await FetchPlaylistWithRetryAsync(variantUrl);
+        }
+        Uri? baseUri;
+        lock (_gate) baseUri = _variantBase;
+        return (raw, baseUri);
+    }
+
     private async Task<string?> FetchPlaylistWithRetryAsync(string url)
     {
         for (var attempt = 1; attempt <= PlaylistFetchAttempts; attempt++)
@@ -575,6 +678,10 @@ public sealed class SxmEdgeProxy : IDisposable
         bool haveMediaSequence = false;
         string? pendingPdt = null;
         double pendingDur = 0;
+        var rawHeaderTags = new List<string>();
+        bool sawRawSegment = false;
+        string? origTarget = null;
+        string? servedTarget = null;
 
         foreach (var lineRaw in text.Split('\n'))
         {
@@ -582,6 +689,14 @@ public sealed class SxmEdgeProxy : IDisposable
             if (line.StartsWith("#EXT-X-ENDLIST", StringComparison.Ordinal) ||
                 line.StartsWith("#EXT-X-PLAYLIST-TYPE", StringComparison.Ordinal))
                 continue;
+
+            if (!sawRawSegment)
+            {
+                if (line.StartsWith('#') && !line.StartsWith("#EXT-X-KEY", StringComparison.Ordinal))
+                    rawHeaderTags.Add(line.Length > 60 ? line[..60] : line);
+                else if (line.Length > 0 && !line.StartsWith('#'))
+                    sawRawSegment = true;
+            }
 
             if (line.StartsWith("#EXT-X-PROGRAM-DATE-TIME:", StringComparison.Ordinal))
                 pendingPdt = line["#EXT-X-PROGRAM-DATE-TIME:".Length..].Trim();
@@ -620,6 +735,13 @@ public sealed class SxmEdgeProxy : IDisposable
                 outLine = "seg/" + name;
                 isSegment = true;
             }
+            else if (line.StartsWith("#EXT-X-TARGETDURATION:", StringComparison.Ordinal))
+            {
+                origTarget = line["#EXT-X-TARGETDURATION:".Length..].Trim();
+                var overrideSec = TargetDurationOverrideSeconds;
+                outLine = overrideSec > 0 ? "#EXT-X-TARGETDURATION:" + overrideSec : line;
+                servedTarget = outLine["#EXT-X-TARGETDURATION:".Length..];
+            }
             else outLine = line;
 
             if (!seenFirstSegment && !isSegment)
@@ -648,7 +770,15 @@ public sealed class SxmEdgeProxy : IDisposable
         if (haveMediaSequence || drop > 0) sb.Append("#EXT-X-MEDIA-SEQUENCE:").Append(outSeq).Append('\n');
         for (int i = drop; i < end; i++) sb.Append(blocks[i]);
         if (pending.Length > 0 && LiveDelaySegments == 0) sb.Append(pending);
-        return sb.ToString();
+        var served = sb.ToString();
+        if (!_headerLogged && blocks.Count > 0)
+        {
+            _headerLogged = true;
+            var head = string.Join(" | ", served.Split('\n').Take(8).Select(s => s.Length > 50 ? s[..50] : s));
+            _log?.Invoke($"SXM edge proxy: playlist header cdnTags=[{string.Join(" | ", rawHeaderTags.Take(10))}] " +
+                         $"targetDuration={origTarget ?? "absent"}->{servedTarget ?? "absent"} servedHead=[{head}]");
+        }
+        return served;
     }
 
     // Short, unique, path-safe key for a segment URL: its filename (e.g. 9446_256k_..._v3.aac). If two
@@ -760,6 +890,7 @@ public sealed class SxmEdgeProxy : IDisposable
 
     public void Dispose()
     {
+        try { _continuous?.Dispose(); } catch { }
         try { _cts?.Cancel(); } catch { }
         try { _listener.Stop(); } catch { }
         try { _listener.Close(); } catch { }

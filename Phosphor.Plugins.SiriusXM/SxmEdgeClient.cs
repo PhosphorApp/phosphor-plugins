@@ -56,6 +56,15 @@ public sealed class SxmEdgeClient : IDisposable
         set => Interlocked.Exchange(ref _extraLagMs, Math.Max(0, value));
     }
 
+    // When >= 0, the full lag (ms) to assume instead of LiveAudioLagMs + ExtraLagMs. Set for the continuous
+    // stream, where the player has no HLS start offset and the lag is known from the stream's own start.
+    private long _lagOverrideMs = -1;
+    public long LagOverrideMs
+    {
+        get => Interlocked.Read(ref _lagOverrideMs);
+        set => Interlocked.Exchange(ref _lagOverrideMs, value < 0 ? -1 : value);
+    }
+
     private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
 
     private readonly string _username;
@@ -135,7 +144,8 @@ public sealed class SxmEdgeClient : IDisposable
     {
         var r = await FetchLiveUpdateAsync(channel, ct);
         if (r is not { } root) return null;
-        return ExtractNowPlaying(root, playbackPosition, _log, LiveAudioLagMs + ExtraLagMs);
+        var lagOverride = LagOverrideMs;
+        return ExtractNowPlaying(root, playbackPosition, _log, lagOverride >= 0 ? lagOverride : LiveAudioLagMs + ExtraLagMs);
     }
 
     // Shared liveUpdate POST used by now-playing: resolves the channelId and requests the schedule
