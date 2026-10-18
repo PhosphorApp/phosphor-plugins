@@ -65,3 +65,6 @@ dist/
 # Local NuGet feed config (machine-specific: local abstractions feed)
 nuget.config
 
+
+# Local session handoff notes (not part of the repo)
+HANDOFF-*.md

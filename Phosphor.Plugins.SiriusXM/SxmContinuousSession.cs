@@ -29,8 +29,10 @@ internal sealed class SxmContinuousSession : IDisposable
     private static readonly byte[] TsOwner = Encoding.ASCII.GetBytes("com.apple.streaming.transportStreamTimestamp");
 
     private const int PollMs = 4000;
+    private const int FailedPollMs = 1000;        // retry interval while the last poll failed, so the stream resumes soon after connectivity returns
     private const int RingMax = 40;
-    private const int MaxFailPolls = 3;
+    private const int MaxFailPolls = 10;          // failed polls (about a second apart) on one segment before the stream skips it
+    private const double StallThresholdMs = 1000; // the player draining by more than this counts as a stall
 
     private sealed record SegInfo(long Seq, string Url, double Dur, string? KeyGuid, byte[]? Iv, bool Discontinuity);
     private sealed record Chunk(long Seq, byte[] Data, double AudioMs);
@@ -93,6 +95,12 @@ internal sealed class SxmContinuousSession : IDisposable
     private int _clients;
     private volatile bool _hadClient;
     private long _idleSinceTs = Stopwatch.GetTimestamp();
+    private readonly int _failedPollMs;
+
+    // Total time (ms) the player ran dry while a client was connected (an outage longer than its buffer). Playback
+    // then trails live by that much more than at start, so now-playing adds it to its lag.
+    private long _stallMs;
+    public long StallMs => Interlocked.Read(ref _stallMs);
 
     public SxmContinuousSession(
         Func<Task<(string? raw, Uri? baseUri)>> getPlaylist,
@@ -103,7 +111,8 @@ internal sealed class SxmContinuousSession : IDisposable
         Action<string>? log,
         Action<SxmContinuousSession>? onStopped = null,
         TimeSpan? idleStop = null,
-        int pollMs = PollMs)
+        int pollMs = PollMs,
+        int failedPollMs = FailedPollMs)
     {
         _getPlaylist = getPlaylist;
         _fetchSegment = fetchSegment;
@@ -114,6 +123,7 @@ internal sealed class SxmContinuousSession : IDisposable
         _onStopped = onStopped;
         _idleStop = idleStop ?? DefaultIdleStop;
         _pollMs = pollMs;
+        _failedPollMs = failedPollMs;
     }
 
     public void Start() => _ = Task.Run(() => FeedAsync(_cts.Token));
@@ -179,6 +189,7 @@ internal sealed class SxmContinuousSession : IDisposable
         double sentMs = 0;
         int sent = 0;
         long bytesSent = 0;
+        long stalledMs = 0;
         int delay = _getDelay();
         Volatile.Write(ref _activeDelay, delay);
         long next;
@@ -217,6 +228,18 @@ internal sealed class SxmContinuousSession : IDisposable
                 }
 
                 if (!clock.IsRunning) clock.Start();
+
+                // If the player ran dry before this write (an outage longer than its buffer), the time it sat silent
+                // is a stall: playback is now that much further behind live. Rebase the playout clock past it.
+                var queuedMs = sentMs - (clock.ElapsedMilliseconds - stalledMs);
+                if (queuedMs < -StallThresholdMs)
+                {
+                    var gap = (long)-queuedMs;
+                    stalledMs += gap;
+                    var totalStall = Interlocked.Add(ref _stallMs, gap);
+                    _log?.Invoke(FormattableString.Invariant(
+                        $"SXM continuous: player ran dry for ~{gap / 1000.0:F1}s (total {totalStall / 1000.0:F1}s); now-playing lag extended."));
+                }
                 await output.WriteAsync(c.Data, token);
                 await output.FlushAsync(token);
                 sent++;
@@ -224,7 +247,7 @@ internal sealed class SxmContinuousSession : IDisposable
                 sentMs += c.AudioMs;
                 next++;
                 _log?.Invoke(FormattableString.Invariant(
-                    $"SXM continuous: client sent seq={c.Seq} bytes={c.Data.Length} aheadMs={sentMs - clock.ElapsedMilliseconds:F0} behindEdge={edge - c.Seq}."));
+                    $"SXM continuous: client sent seq={c.Seq} bytes={c.Data.Length} aheadMs={sentMs - (clock.ElapsedMilliseconds - stalledMs):F0} behindEdge={edge - c.Seq}."));
             }
         }
         catch (OperationCanceledException) { reason = "cancelled"; }
@@ -242,19 +265,27 @@ internal sealed class SxmContinuousSession : IDisposable
     private async Task FeedAsync(CancellationToken ct)
     {
         _log?.Invoke($"SXM continuous: session started (delaySegments={_getDelay()}, pollMs={_pollMs}).");
+        var failedPolls = 0;
         while (!ct.IsCancellationRequested)
         {
+            var ok = false;
             try
             {
                 var (raw, baseUri) = await _getPlaylist();
                 if (raw != null && baseUri != null)
-                    await IngestAsync(Scan(raw), raw, baseUri, ct);
-                else
-                    _log?.Invoke("SXM continuous: playlist unavailable this poll.");
+                    ok = await IngestAsync(Scan(raw), raw, baseUri, ct);
+                else if (failedPolls % 15 == 0)
+                    _log?.Invoke("SXM continuous: playlist unavailable (retrying every " + (_failedPollMs / 1000.0).ToString("0.#", CultureInfo.InvariantCulture) + "s).");
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex) { _log?.Invoke($"SXM continuous: feed error {ex.GetType().Name}: {ex.Message}"); }
-            try { await Task.Delay(_pollMs, ct); }
+            if (ok)
+            {
+                if (failedPolls > 0) _log?.Invoke($"SXM continuous: feed recovered after {failedPolls} failed poll(s).");
+                failedPolls = 0;
+            }
+            else failedPolls++;
+            try { await Task.Delay(ok ? _pollMs : _failedPollMs, ct); }
             catch (OperationCanceledException) { break; }
             if (Volatile.Read(ref _clients) == 0 &&
                 Stopwatch.GetElapsedTime(Volatile.Read(ref _idleSinceTs)) >= _idleStop)
@@ -357,9 +388,9 @@ internal sealed class SxmContinuousSession : IDisposable
         return Convert.FromHexString(hex.PadLeft(32, '0'));
     }
 
-    private async Task IngestAsync(PlaylistScan scan, string raw, Uri baseUri, CancellationToken ct)
+    private async Task<bool> IngestAsync(PlaylistScan scan, string raw, Uri baseUri, CancellationToken ct)
     {
-        if (scan.Total == 0) return;
+        if (scan.Total == 0) return false;
         var newest = scan.Newest;
         var delay = _getDelay();
 
@@ -392,8 +423,9 @@ internal sealed class SxmContinuousSession : IDisposable
         foreach (var s in segs)
         {
             ct.ThrowIfCancellationRequested();
-            if (!await IngestOneAsync(s)) break;
+            if (!await IngestOneAsync(s)) return false;
         }
+        return true;
     }
 
     // Returns true to continue with the next segment, false to stop and retry this one on the next poll.

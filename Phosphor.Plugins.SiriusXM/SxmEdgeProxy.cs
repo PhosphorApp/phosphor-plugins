@@ -106,7 +106,8 @@ public sealed class SxmEdgeProxy : IDisposable
 
     /// <summary>
     /// How far behind live (ms) the audio now being heard is, when a continuous stream is active; null when
-    /// the HLS path is in use. The stream starts (delay + 1) segments before the live edge's end.
+    /// the HLS path is in use. The stream starts (delay + 1) segments before the live edge's end, plus any time the
+    /// player has since run dry during an outage.
     /// </summary>
     public long? ContinuousStreamLagMs()
     {
@@ -115,7 +116,7 @@ public sealed class SxmEdgeProxy : IDisposable
         if (s == null) return null;
         var active = s.ActiveDelaySegments;
         var segments = (active >= 0 ? active : LiveDelaySegments) + 1;
-        return (long)(segments * s.SegmentMs) + ContinuousBaseLagMs;
+        return (long)(segments * s.SegmentMs) + ContinuousBaseLagMs + s.StallMs;
     }
 
     /// <summary>
@@ -518,7 +519,7 @@ public sealed class SxmEdgeProxy : IDisposable
     }
 
     // Raw CDN media playlist (with retry) plus the base URI for resolving relative segment URLs. Used by the
-    // experimental continuous session; re-resolves the signed window when the playlist can't be fetched.
+    // continuous session; re-resolves the signed window when the playlist can't be fetched.
     private async Task<(string? raw, Uri? baseUri)> GetPlaylistForContinuousAsync()
     {
         string variantUrl;
@@ -530,12 +531,15 @@ public sealed class SxmEdgeProxy : IDisposable
             lock (_gate) variantUrl = _variantUrl;
         if (string.IsNullOrEmpty(variantUrl)) return (null, null);
 
-        var raw = await FetchPlaylistWithRetryAsync(variantUrl);
+        // One attempt per poll: the feeder polls again a second later when this fails, so an inner retry loop is
+        // redundant. Re-resolving the signed window honours the usual cooldown, so a fast retry cadence never
+        // hammers the gateway.
+        var raw = await FetchCdnStringAsync(variantUrl);
         if ((raw == null || !HasSegments(raw)) && channel != null &&
-            await ResolveVariantAsync(channel, CancellationToken.None))
+            await TryReresolveAsync("playlist unavailable (continuous)"))
         {
             lock (_gate) variantUrl = _variantUrl;
-            raw = await FetchPlaylistWithRetryAsync(variantUrl);
+            raw = await FetchCdnStringAsync(variantUrl);
         }
         Uri? baseUri;
         lock (_gate) baseUri = _variantBase;

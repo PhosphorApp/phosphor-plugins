@@ -164,6 +164,10 @@ player has a cushion of buffered audio. The old HLS path is still used when the 
 - Now-playing assumes the audio trails live by `(live delay + 1)` segments, so the title follows what you hear.
 - The session ends when you stop playback or change channel (the host's stop notification), and stops itself
   after 60 seconds with no player connected, so nothing keeps fetching audio in the background.
+- If the connection drops, the feed retries every second and resumes where it left off. The live delay is the
+  outage cushion: roughly `(live delay + 1) x 10` seconds of audio is already buffered, so raise it on a spotty
+  connection. An outage longer than the cushion pauses the audio and the stream continues from the missed point;
+  the time lost is added to the now-playing lag.
 
 ## Upgrade note (v1.0.x → v1.1.0)
 
