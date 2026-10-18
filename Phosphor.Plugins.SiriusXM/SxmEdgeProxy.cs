@@ -89,7 +89,7 @@ public sealed class SxmEdgeProxy : IDisposable
     public int Port { get; private set; }
     public bool IsRunning { get; private set; }
 
-    // EXPERIMENTAL: serve one continuous packed-AAC stream (decrypted here) instead of an HLS playlist, so
+    // Serve one continuous packed-AAC stream (decrypted here) instead of an HLS playlist, so
     // LibVLC's adaptive/HLS playlist logic is out of the timing path. Off = the normal HLS path.
     private volatile bool _continuousMode;
     public bool ContinuousMode
@@ -98,8 +98,9 @@ public sealed class SxmEdgeProxy : IDisposable
         set => _continuousMode = value;
     }
     private SxmContinuousSession? _continuous;
+    private string? _continuousChannelId;
 
-    // Allowance (ms) for player start-up latency and publish delay on top of the segments the continuous
+    // Allowance (ms)
     // stream starts behind live. Calibrated by ear (title ~20s behind with a 60s assumption => ~40s real).
     private const long ContinuousBaseLagMs = 1000;
 
@@ -117,7 +118,20 @@ public sealed class SxmEdgeProxy : IDisposable
         return (long)(segments * s.SegmentMs) + ContinuousBaseLagMs;
     }
 
-    /// <summary>Default number of newest segments withheld
+    /// <summary>
+    /// The host reported playback of <paramref name="channelId"/> stopped. Stops the continuous session only when it
+    /// is that channel's session and has already served a client (see <see cref="SxmContinuousSession.TryStopForRelease"/>).
+    /// </summary>
+    public void StopContinuousFor(string channelId)
+    {
+        SxmContinuousSession? s;
+        string? id;
+        lock (_gate) { s = _continuous; id = _continuousChannelId; }
+        if (s == null || !string.Equals(id, channelId, StringComparison.Ordinal)) return;
+        s.TryStopForRelease(3);
+    }
+
+    /// <summary>Default number of newest segments withheld from the served playlist (~10s each).</summary>
     public const int DefaultLiveDelaySegments = 3;
     public const int MaxLiveDelaySegments = 8;
 
@@ -204,16 +218,17 @@ public sealed class SxmEdgeProxy : IDisposable
                 GetKeyAsync,
                 reason => TryReresolveAsync(reason),
                 () => LiveDelaySegments,
-                _log);
-            lock (_gate) { old = _continuous; _continuous = session; }
+                _log,
+                onStopped: stopped => { lock (_gate) { if (ReferenceEquals(_continuous, stopped)) _continuous = null; } });
+            lock (_gate) { old = _continuous; _continuous = session; _continuousChannelId = channel.Id; }
             old?.Dispose();
             session.Start();
-            _log?.Invoke("SXM edge proxy: CONTINUOUS stream mode (experimental) - serving /stream.aac instead of HLS.");
+            _log?.Invoke("SXM edge proxy: CONTINUOUS stream mode - serving /stream.aac instead of HLS.");
             return $"http://127.0.0.1:{Port}/stream.aac?ch={Uri.EscapeDataString(channel.Id)}&t={DateTimeOffset.UtcNow.Ticks}";
         }
         lock (_gate) { _continuous?.Dispose(); _continuous = null; }
 
-        // Unique per-channel URL so LibVLC re-opens the stream
+        // Unique per-channel URL so LibVLC re-opens the stream on a channel switch instead of keeping
         // the previous channel's buffered audio (the local master URL is otherwise identical).
         return $"http://127.0.0.1:{Port}/master.m3u8?ch={Uri.EscapeDataString(channel.Id)}&t={DateTimeOffset.UtcNow.Ticks}";
     }

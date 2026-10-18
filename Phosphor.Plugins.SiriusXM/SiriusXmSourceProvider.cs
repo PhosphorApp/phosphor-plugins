@@ -22,7 +22,8 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
     /// <summary>Settings key: local HLS proxy port.</summary>
     public const string KeyProxyPort = "proxyPort";
 
-    /// <summary>Settings key: use the legacy cookie streaming path instead of the edge gateway.</summary>
+    /// <summary>Settings key: legacy cookie streaming path. Not exposed in the settings schema and ignored when read;
+    /// the key remains only so the legacy code path can be revived.</summary>
     public const string KeyUseLegacyStreaming = "useLegacyStreaming";
 
     /// <summary>Settings key: how many ~10s segments to stay behind live (network-blip cushion).</summary>
@@ -31,8 +32,11 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
     /// <summary>Settings key: experimental override of the served HLS target duration (seconds; 0 = off).</summary>
     public const string KeyTargetDurationOverride = "targetDurationOverride";
 
-    /// <summary>Settings key: experimental continuous (non-HLS) stream mode toggle.</summary>
+    /// <summary>Settings key: continuous (non-HLS) stream mode toggle.</summary>
     public const string KeyContinuousStream = "continuousStream";
+
+    /// <summary>Continuous stream mode is on unless the user turns it off.</summary>
+    public const bool DefaultContinuousStream = true;
     public const string RegionUs = "US";
     public const string RegionCa = "CA";
 
@@ -81,14 +85,10 @@ public sealed class SiriusXmSourceProvider : IPhosphorSourceProvider
             DefaultValue: "0",
             HelpText: "Experimental. Makes the player poll the playlist faster, which may avoid a brief audio " +
                       "glitch about every 3 minutes. 0 = off (default). Try 9. Applies on the next playlist refresh."),
-        new(KeyContinuousStream, "Continuous stream mode (experimental)", PluginSettingType.Bool, DefaultValue: "false",
-            HelpText: "Experimental. Feeds the player one continuous audio stream instead of an HLS playlist, " +
-                      "to avoid brief glitches caused by the player's playlist handling. Takes effect on the " +
-                      "next play. Leave OFF unless testing; switch it off if audio misbehaves."),
-        new(KeyUseLegacyStreaming, "Use legacy streaming (fallback)", PluginSettingType.Bool, DefaultValue: "false",
-            HelpText: "Advanced/diagnostic: stream via the older SiriusXM cookie path instead of the " +
-                      "edge-gateway API. Leave OFF unless edge-gateway playback fails and you need a " +
-                      "temporary workaround. Now-playing and the channel lineup always use the gateway."),
+        new(KeyContinuousStream, "Continuous stream mode", PluginSettingType.Bool, DefaultValue: "true",
+            HelpText: "Feeds the player one continuous audio stream instead of an HLS playlist, which avoids " +
+                      "brief audio glitches caused by the player's playlist handling. Takes effect on the " +
+                      "next play. Turn OFF to use standard HLS playback if audio misbehaves."),
     ];
 
     public IPhosphorSource CreateInstance(string instanceId, IReadOnlyDictionary<string, string?> settings)

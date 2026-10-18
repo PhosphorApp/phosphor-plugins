@@ -16,15 +16,14 @@ namespace Phosphor.Plugins.SiriusXM;
 /// suppresses seek/duration and never auto-advances.
 /// </remarks>
 public sealed class SiriusXmSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver, IConnectionTestable, IFavoritable, IFavoriteMetadataRefresh, IHideable, IRefreshable, ILiveNowPlayingProvider, IReplayableById, IDisposable
+    IPhosphorSource, IBrowsable, ITextSearchCapable, IContainerPlayPolicy, IPlayableResolver, IConnectionTestable, IFavoritable, IFavoriteMetadataRefresh, IHideable, IRefreshable, ILiveNowPlayingProvider, IReplayableById, IPlaybackStoppable, IDisposable
 {
     private readonly object _gate = new();
     private IPluginHost? _host;
 
-    // Streaming path selector, backed by the "useLegacyStreaming" setting (default false). false =
-    // edge-gateway tuneSource (bearer). true = legacy cookie player.siriusxm.com path — a diagnostic
-    // fallback for when gateway playback fails. Now-playing and the channel lineup always use the
-    // gateway regardless. Changing it tears down the running proxy so the next resolve uses the choice.
+    // Streaming path selector, backed by the "useLegacyStreaming" key (default false). The setting is no longer
+    // exposed in the settings UI; the legacy cookie path (SxmClient/SxmProxy) is kept in the project in case it
+    // is revived, but it expects the old slug channel ids and does not work with the current gateway UUIDs.
     private bool _useLegacyStreaming;
 
     private string _username = "";
@@ -34,7 +33,7 @@ public sealed class SiriusXmSource :
     private int _proxyPort = SiriusXmSourceProvider.DefaultProxyPort;
     private int _liveDelaySegments = SxmEdgeProxy.DefaultLiveDelaySegments;
     private int _targetDurationOverride;
-    private bool _continuousStream;
+    private bool _continuousStream = SiriusXmSourceProvider.DefaultContinuousStream;
 
     private SxmClient? _client;
     private SxmProxy? _proxy;
@@ -83,12 +82,15 @@ public sealed class SiriusXmSource :
         var newPort = int.TryParse(Get(values, SiriusXmSourceProvider.KeyProxyPort), out var p) && p is > 0 and <= 65535
             ? p : SiriusXmSourceProvider.DefaultProxyPort;
 
-        var newUseLegacy = bool.TryParse(Get(values, SiriusXmSourceProvider.KeyUseLegacyStreaming), out var ul) && ul;
+        // The legacy cookie path is no longer selectable and cannot work with the gateway UUID channel ids, so a
+        // previously saved "useLegacyStreaming" value is deliberately ignored.
+        const bool newUseLegacy = false;
         var newDelay = int.TryParse(Get(values, SiriusXmSourceProvider.KeyLiveDelaySegments), out var ld)
             ? Math.Clamp(ld, 0, SxmEdgeProxy.MaxLiveDelaySegments) : SxmEdgeProxy.DefaultLiveDelaySegments;
         var newTarget = int.TryParse(Get(values, SiriusXmSourceProvider.KeyTargetDurationOverride), out var td)
             ? Math.Clamp(td, 0, 20) : 0;
-        var newContinuous = bool.TryParse(Get(values, SiriusXmSourceProvider.KeyContinuousStream), out var cs) && cs;
+        var newContinuous = bool.TryParse(Get(values, SiriusXmSourceProvider.KeyContinuousStream), out var cs)
+            ? cs : SiriusXmSourceProvider.DefaultContinuousStream;
 
         // Credentials changed — drop any live client/lineup so the next use re-authenticates. If the
         // port OR the streaming path changed, tear down the running proxies so the next resolve rebinds
@@ -678,6 +680,24 @@ public sealed class SiriusXmSource :
             Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, $"SXM np failed: {ex.Message}");
             return null;
         }
+    }
+
+    // ── IPlaybackStoppable ──
+
+    /// <summary>
+    /// The host reports playback of a channel stopped (stop, skip, track change or shutdown). Stops that channel's
+    /// continuous stream session so it does not keep fetching segments for nobody. Best-effort; never throws.
+    /// </summary>
+    public void ReleasePlayback(string itemId)
+    {
+        try
+        {
+            Log(Phosphor.Plugin.Abstractions.LogLevel.Debug, $"SXM: ReleasePlayback('{itemId}').");
+            SxmEdgeProxy? proxy;
+            lock (_gate) proxy = _edgeProxy;
+            proxy?.StopContinuousFor(itemId);
+        }
+        catch { /* best-effort */ }
     }
 
     // ── ILiveUpNextProvider (next song coming up on the playing channel) ─────────

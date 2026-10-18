@@ -8,8 +8,7 @@ Loaded dynamically from the host's `plugins/SiriusXM/` folder; references only
 
 **v1.3.0** — runs entirely on the SiriusXM **edge-gateway API**
 (`api.edge-gateway.siriusxm.com`) with **bearer-token (JWT)** auth. Auth, channel lineup, now-playing,
-and live streaming are all off the deprecated cookie `player.siriusxm.com` path. The legacy cookie
-code is retained as a compile-time fallback only (see **Legacy fallback**).
+and live streaming all use the gateway.
 
 ## How it works
 
@@ -133,7 +132,10 @@ Plug-ins tab → add **SiriusXM** → set **Username** / **Password** (Secret) /
 **Test connection**. Credentials are `Secret` settings; enable the app's DPAPI "encrypt secrets"
 option to protect them at rest. **Proxy port** (default `8912`) sets the local HLS proxy's port —
 change it only if another app already uses that port; the running proxy rebinds when you save a new value.
-**Use legacy streaming (fallback)** (default OFF) is an advanced/diagnostic toggle — see below.
+**Live delay (segments)** (default `3`) sets how far behind live playback runs, in ~10 second segments; a larger
+value gives a bigger cushion against network hiccups, `0` plays at the live edge. **Continuous stream mode**
+(default ON) feeds the player one continuous audio stream instead of an HLS playlist; turn it OFF to use
+standard HLS playback.
 
 ## Streaming resilience
 
@@ -150,13 +152,18 @@ the signed window has lapsed), `SxmEdgeProxy`:
   re-resolve, so a rotated key is re-fetched rather than decrypting to silence.
 - Bounds the segment-name→URL map (last ~200) so long sessions don't grow memory.
 
-## Legacy fallback
+## Continuous stream mode
 
-The original cookie `player.siriusxm.com` streaming path (`SxmClient` / `SxmProxy`) is retained as a
-diagnostic fallback, exposed as the **Use legacy streaming (fallback)** setting (default OFF). Turn it
-ON only if edge-gateway playback fails and you need a temporary workaround; auth, the channel lineup,
-and now-playing always use the gateway regardless. Changing the setting rebinds the proxy on the next
-resolve. When the edge path is fully trusted, the legacy path (and this setting) can be removed.
+By default the proxy does not give the player an HLS playlist. A background feeder polls the CDN media
+playlist, fetches and AES-128-decrypts the segments itself, and serves them as one continuous packed-AAC
+stream at `/stream.aac`. Playback starts *Live delay* segments behind the live edge and stays there, so the
+player has a cushion of buffered audio. The old HLS path is still used when the setting is turned off.
+
+- Each segment is checked as it is ingested (ADTS frame count, real audio duration, timestamp continuity) and
+  logged; inline metadata tags and stray bytes are removed so the player only receives audio frames.
+- Now-playing assumes the audio trails live by `(live delay + 1)` segments, so the title follows what you hear.
+- The session ends when you stop playback or change channel (the host's stop notification), and stops itself
+  after 60 seconds with no player connected, so nothing keeps fetching audio in the background.
 
 ## Upgrade note (v1.0.x → v1.1.0)
 
@@ -167,5 +174,4 @@ lineup cache auto-invalidates. Re-favoriting/hiding once after upgrade is expect
 ## Deferred / future
 
 - **Decade & sub-genre tiles** matching the web UI (needs the curated-grouping containers).
-- Retiring the **legacy cookie code** once gateway streaming is fully trusted.
 - Live-stream **UI polish** (tuner-style navigation, hiding the scrub bar entirely).
