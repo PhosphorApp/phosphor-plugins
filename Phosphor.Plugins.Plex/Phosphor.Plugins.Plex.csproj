@@ -15,7 +15,7 @@
 	<ImplicitUsings>enable</ImplicitUsings>
 	<AssemblyName>Phosphor.Plugins.Plex</AssemblyName>
 	<RootNamespace>Phosphor.Plugins.Plex</RootNamespace>
-	<Version>1.0.1</Version>
+	<Version>1.0.2</Version>
 	<IsPackable>false</IsPackable>
 	<EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>

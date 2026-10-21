@@ -502,7 +502,9 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
 
         // Plex items already carry a ready-to-play StreamUrl (built at browse time).
         var v = PlexMappings.VideoItemOf(item);
-        return v == null ? null : PlexMappings.ToResolvedStream(v);
+        if (v == null) return null;
+        await _plex.PrimeTranscodeAsync(v.StreamUrl, ct);
+        return PlexMappings.ToResolvedStream(v);
     }
 
     public async Task<SourceMetadata?> GetMetadataAsync(SourceItem item, CancellationToken ct = default)

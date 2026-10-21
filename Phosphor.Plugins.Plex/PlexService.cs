@@ -70,6 +70,39 @@ public class PlexService
         Log(LogLevel.Info, "Plex", $"Configured: server={_serverUrl} stereoAudio={_stereoAudio}");
     }
 
+    private const string TranscodeStartSegment = "/video/:/transcode/universal/start?";
+
+    /// <summary>
+    /// Plex rejects a universal-transcode <c>start</c> with 400 unless a <c>decision</c> request for the same
+    /// session was made first (the first start after a server idle period can slip through, later ones cannot).
+    /// Issues that decision for transcode URLs; no-op for direct-play URLs. Failures are logged, never thrown.
+    /// </summary>
+    public async Task PrimeTranscodeAsync(string? streamUrl, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(streamUrl))
+            return;
+        var idx = streamUrl.IndexOf(TranscodeStartSegment, StringComparison.Ordinal);
+        if (idx < 0)
+            return;
+
+        var decisionUrl = streamUrl.Substring(0, idx) + "/video/:/transcode/universal/decision?"
+            + streamUrl.Substring(idx + TranscodeStartSegment.Length);
+        try
+        {
+            using var resp = await _http.GetAsync(decisionUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!resp.IsSuccessStatusCode)
+                Log(LogLevel.Warning, "Plex", $"Transcode decision returned {(int)resp.StatusCode} {resp.ReasonPhrase}");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log(LogLevel.Warning, "Plex", $"Transcode decision failed: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// Fetch chapter markers for a specific Plex item by rating key.
     /// Returns null if no chapters are found.
