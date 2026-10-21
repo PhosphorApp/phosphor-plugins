@@ -333,6 +333,30 @@ public class PlexService
                     }
                 }
 
+                // Plex groups live/soundtrack/compilation albums separately, so /children omits them.
+                // Query every album (all subtypes) for this artist directly.
+                if (!string.IsNullOrEmpty(sectionKey))
+                {
+                    try
+                    {
+                        var allUrl = $"{_serverUrl}/library/sections/{sectionKey}/all?type=9&artist.id={ratingKey}&X-Plex-Token={_token}";
+                        var allDoc = await FetchJsonAsync(allUrl, ct);
+                        var known = new HashSet<string>(items.Where(i => i.PlexRatingKey != null).Select(i => i.PlexRatingKey!));
+                        foreach (var album in ParsePlexItems(allDoc, PlexItemType.Album).Where(a => a.PlexRatingKey != null))
+                        {
+                            if (known.Add(album.PlexRatingKey!))
+                            {
+                                items.Add(album);
+                                DiagLog($"  + Found extra album: {album.Title} (key={album.PlexRatingKey})");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log(LogLevel.Warning, "Plex", $"Error querying all albums for artist: {ex.Message}");
+                    }
+                }
+
                 if (!string.IsNullOrEmpty(artistName) && !string.IsNullOrEmpty(sectionKey))
                 {
                     DiagLog($"Searching for compilation albums by '{artistName}' in section {sectionKey}");
