@@ -181,6 +181,47 @@ public sealed class EmbyClient
         return ParsePage(doc.RootElement);
     }
 
+    /// <summary>One page of MusicArtist entities in a music library (same list and order as
+    /// <see cref="GetArtistsAsync"/>).</summary>
+    public async Task<EmbyPage> GetArtistsPageAsync(string parentId, int startIndex, int limit, CancellationToken ct = default)
+    {
+        await AuthenticateAsync(ct);
+
+        var url = new StringBuilder($"{_serverUrl}/Artists?ParentId={Uri.EscapeDataString(parentId)}&UserId={_userId}");
+        url.Append("&Recursive=true&SortBy=SortName&SortOrder=Ascending");
+        url.Append("&Fields=PrimaryImageAspectRatio&EnableImageTypes=Primary&ImageTypeLimit=1");
+        if (startIndex > 0) url.Append($"&StartIndex={startIndex}");
+        if (limit > 0) url.Append($"&Limit={limit}");
+
+        using var doc = await GetJsonAsync(url.ToString(), ct);
+        return ParsePage(doc.RootElement);
+    }
+
+    /// <summary>
+    /// Counts the entries of a library list whose SortName sorts before <paramref name="nameLessThan"/>
+    /// (the whole list when null). Mirrors the filters of <see cref="GetItemsAsync"/> /
+    /// <see cref="GetArtistsPageAsync"/>, so the result is a valid StartIndex for that list.
+    /// </summary>
+    public async Task<int> CountBeforeAsync(
+        string parentId, string? includeItemTypes, bool recursive, bool artists,
+        string? nameLessThan, CancellationToken ct = default)
+    {
+        await AuthenticateAsync(ct);
+
+        var rec = recursive ? "true" : "false";
+        var url = artists
+            ? new StringBuilder($"{_serverUrl}/Artists?ParentId={Uri.EscapeDataString(parentId)}&UserId={_userId}&Recursive=true")
+            : new StringBuilder($"{_serverUrl}/Users/{_userId}/Items?ParentId={Uri.EscapeDataString(parentId)}&Recursive={rec}");
+        if (!artists && !string.IsNullOrEmpty(includeItemTypes))
+            url.Append($"&IncludeItemTypes={Uri.EscapeDataString(includeItemTypes)}");
+        url.Append("&SortBy=SortName&SortOrder=Ascending&Limit=1&EnableTotalRecordCount=true");
+        if (!string.IsNullOrEmpty(nameLessThan))
+            url.Append($"&NameLessThan={Uri.EscapeDataString(nameLessThan)}");
+
+        using var doc = await GetJsonAsync(url.ToString(), ct);
+        return ParsePage(doc.RootElement).TotalCount;
+    }
+
     /// <summary>
     /// Free-text search across the whole library for playable content (audio + video). Uses the
     /// recursive Items query with a <c>SearchTerm</c>.

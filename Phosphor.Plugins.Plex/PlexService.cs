@@ -175,7 +175,9 @@ public class PlexService
             "show" => "&type=2",
             _ => "",
         };
-        var url = $"{_serverUrl}/library/sections/{sectionKey}/all?X-Plex-Container-Start={start}&X-Plex-Container-Size={count}{typeFilter}&X-Plex-Token={_token}{StreamParam}";
+        // Explicit titleSort so the letter index (GetLibraryFirstCharactersAsync) offsets stay valid
+        // regardless of the server's default ordering.
+        var url = $"{_serverUrl}/library/sections/{sectionKey}/all?sort=titleSort&X-Plex-Container-Start={start}&X-Plex-Container-Size={count}{typeFilter}&X-Plex-Token={_token}{StreamParam}";
         var doc = await FetchJsonAsync(url, ct);
 
         var items = libraryType switch
@@ -191,6 +193,30 @@ public class PlexService
             totalSize = ts.GetInt32();
 
         return new PlexPage { Items = items, TotalSize = totalSize };
+    }
+
+    /// <summary>
+    /// Returns the per-letter item counts for a library's top-level list (the same list
+    /// <see cref="GetLibraryVideosPageAsync"/> pages), in titleSort order. "#" covers non-alphabetic titles.
+    /// </summary>
+    public async Task<List<(string Label, int Count)>> GetLibraryFirstCharactersAsync(string sectionKey, string? libraryType, CancellationToken ct = default)
+    {
+        var type = libraryType switch { "artist" => 8, "show" => 2, _ => 1 };
+        var url = $"{_serverUrl}/library/sections/{sectionKey}/firstCharacter?type={type}&X-Plex-Token={_token}";
+        var doc = await FetchJsonAsync(url, ct);
+
+        var result = new List<(string, int)>();
+        if (doc.RootElement.TryGetProperty("MediaContainer", out var mc) &&
+            mc.TryGetProperty("Directory", out var dirs) && dirs.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            foreach (var d in dirs.EnumerateArray())
+            {
+                var label = d.TryGetProperty("title", out var t) ? t.GetString() : null;
+                if (string.IsNullOrEmpty(label) || !d.TryGetProperty("size", out var s)) continue;
+                result.Add((label, s.GetInt32()));
+            }
+        }
+        return result;
     }
 
     /// <summary>

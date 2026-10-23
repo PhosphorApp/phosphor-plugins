@@ -197,6 +197,24 @@ public sealed class JellyfinClient
     }
 
     /// <summary>
+    /// Counts the children of <paramref name="parentId"/> whose SortName sorts before
+    /// <paramref name="nameLessThan"/> (all children when null). Uses the same ParentId / non-recursive
+    /// query as <see cref="GetItemsAsync"/>, so the result is a valid StartIndex for that list.
+    /// </summary>
+    public async Task<int> CountChildrenBeforeAsync(string parentId, string? nameLessThan, CancellationToken ct = default)
+    {
+        await AuthenticateAsync(ct);
+
+        var url = new StringBuilder($"{_serverUrl}/Users/{_userId}/Items?ParentId={Uri.EscapeDataString(parentId)}");
+        url.Append("&SortBy=SortName&SortOrder=Ascending&Recursive=false&Limit=1&EnableTotalRecordCount=true");
+        if (!string.IsNullOrEmpty(nameLessThan))
+            url.Append($"&NameLessThan={Uri.EscapeDataString(nameLessThan)}");
+
+        using var doc = await GetJsonAsync(url.ToString(), ct);
+        return ParsePage(doc.RootElement).TotalCount;
+    }
+
+    /// <summary>
     /// Free-text search across the whole library for playable content (audio + video). Uses the
     /// recursive Items query with a <c>SearchTerm</c>.
     /// </summary>

@@ -70,6 +70,7 @@ internal static class PlexMappings
         Title = string.IsNullOrWhiteSpace(displayNamePrefix) ? lib.Title : $"{displayNamePrefix} {lib.Title}",
         Icon = lib.Type == "artist" ? "🎵" : "🎬",
         HasSubCategories = true,
+        IsTitleSorted = true,
         SourceState = new PlexNode(PlexNodeKind.Library, lib.Key, lib.Type),
     };
 

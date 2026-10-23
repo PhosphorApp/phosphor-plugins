@@ -16,7 +16,7 @@ namespace Phosphor.Plugins.Plex;
 /// In-box, so it uses <see cref="PlexService"/>, <see cref="VideoItem"/>, and the Plex enums
 /// directly. Pure data producer: no UI, no thread assumptions.
 /// </remarks>
-public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterableSearch, IBrowsable, IPagedBrowsable, IScopedSearchable, IPlayableResolver, IConfigurable, IGaplessCapable, IConnectionTestable, IFavoritable, IFavoriteCapture, ISearchHintProvider, IPlaybackReportable, IPlaybackSuccessReportable, IPlaybackStoppable
+public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterableSearch, IBrowsable, IPagedBrowsable, IAlphaIndexable, IScopedSearchable, IPlayableResolver, IConfigurable, IGaplessCapable, IConnectionTestable, IFavoritable, IFavoriteCapture, ISearchHintProvider, IPlaybackReportable, IPlaybackSuccessReportable, IPlaybackStoppable
 {
     private readonly PlexService _plex = new();
     private readonly PlexLiveTvService _liveTv = new();
@@ -433,6 +433,25 @@ public sealed class PlexSource : IPhosphorSource, ITextSearchCapable, IFilterabl
             Items = page.Items.Select(v => PlexMappings.ToSourceItem(v, InstanceId)).ToList(),
             TotalSize = page.TotalSize,
         };
+    }
+
+    // ── IAlphaIndexable ────────────────────────────────────────────────────────
+
+    public async Task<AlphaIndex?> GetAlphaIndexAsync(SourceCategory category, CancellationToken ct = default)
+    {
+        // Only library roots are title-sorted paged lists (hubs/playlists are not).
+        if (ResolveNode(category) is not { Kind: PlexNodeKind.Library } node)
+            return null;
+
+        var buckets = await _plex.GetLibraryFirstCharactersAsync(node.Key, node.LibraryType, ct);
+        var entries = new List<AlphaIndexEntry>(buckets.Count);
+        int offset = 0;
+        foreach (var (label, count) in buckets)
+        {
+            entries.Add(new AlphaIndexEntry(label, offset, count));
+            offset += count;
+        }
+        return new AlphaIndex { Entries = entries };
     }
 
     // ── IScopedSearchable ──────────────────────────────────────────────────────

@@ -38,7 +38,7 @@ internal enum EmbyMusicLevel
 /// essential on pinball cabs where surround channels drive mechanical/ball exciters.
 /// </summary>
 public sealed class EmbySource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IConfigurable,
+    IPhosphorSource, IBrowsable, IPagedBrowsable, IAlphaIndexable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IConfigurable,
     IFavoritable, IFavoriteCapture
 {
     private EmbyClient? _client;
@@ -205,6 +205,7 @@ public sealed class EmbySource :
                 Icon = IconFor(v.CollectionType),
                 ThumbnailUrl = _client.GetImageUrl(v.Id, v.ImageTag),
                 HasSubCategories = true,
+                IsTitleSorted = true,
                 SourceState = new EmbyState(
                     v.Id, IsAudioOnly: false, v.CollectionType,
                     // Music libraries browse via the entity graph (artists → albums → tracks) so
@@ -233,6 +234,11 @@ public sealed class EmbySource :
         var state = category.SourceState as EmbyState;
         var parentId = state?.ItemId ?? category.CategoryId;
         var collectionType = state?.CollectionType;
+
+        // Library roots are served through the paged path (BrowsePageAsync) so large libraries
+        // lazy-load and the letter jump bar can seek; BrowseAsync returns nothing for them.
+        if (TryGetLibraryList(category, out _))
+            return new BrowseResult();
 
         // Music libraries: browse the entity graph (library → artists → albums → tracks) so artist
         // and album tiles carry their own artwork (the web-UI shape), rather than raw folders.
@@ -438,6 +444,134 @@ public sealed class EmbySource :
         ThumbnailUrl = _client?.GetBestImageUrl(it) ?? fallbackImageUrl,
         HasSubCategories = true,
         SourceState = new EmbyState(it.Id, IsAudioOnly: false, CollectionType: "music", childLevel),
+    };
+
+    // ── IPagedBrowsable / IAlphaIndexable ────────────────────────────────────────
+
+    /// <summary>The flat, SortName-ordered list a library root is browsed as: which parent, whether it
+    /// recurses / filters to a leaf item type, and whether it is the music artist list.</summary>
+    private readonly record struct EmbyListSpec(
+        string ParentId, string? IncludeTypes, bool Recursive, bool Artists, string? CollectionType);
+
+    /// <summary>Resolves a library root to its list spec (the same query <see cref="BrowseAsync"/> used
+    /// to run in one shot). False for the server root and for any non-library node.</summary>
+    private bool TryGetLibraryList(SourceCategory category, out EmbyListSpec spec)
+    {
+        spec = default;
+        var state = category.SourceState as EmbyState;
+        var id = state?.ItemId ?? category.CategoryId;
+        if (id == ServerRootId || !_selectedLibraryIds.Contains(id)) return false;
+
+        var collectionType = state?.CollectionType;
+        if (state?.MusicLevel == EmbyMusicLevel.Library)
+        {
+            spec = new EmbyListSpec(id, null, true, true, collectionType);
+            return true;
+        }
+
+        var (recursive, includeTypes) = collectionType?.ToLowerInvariant() switch
+        {
+            "movies" => (true, "Movie"),
+            "musicvideos" => (true, "MusicVideo"),
+            "homevideos" => (true, "Video"),
+            _ => (false, (string?)null),
+        };
+        spec = new EmbyListSpec(id, includeTypes, recursive, false, collectionType);
+        return true;
+    }
+
+    public async Task<BrowsePage> BrowsePageAsync(
+        SourceCategory category, int offset, int count, CancellationToken ct = default)
+    {
+        EnsureClient();
+        if (_client is null || !TryGetLibraryList(category, out var list)) return new BrowsePage();
+
+        try
+        {
+            var page = list.Artists
+                ? await _client.GetArtistsPageAsync(list.ParentId, offset, count, ct)
+                : await _client.GetItemsAsync(
+                    list.ParentId, includeItemTypes: list.IncludeTypes, startIndex: offset, limit: count,
+                    recursive: list.Recursive, ct: ct);
+            var items = page.Items.Select(it => ToPagedItem(it, list)).ToList();
+            return new BrowsePage { Items = items, TotalSize = page.TotalCount };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _host?.Log(LogLevel.Warning, $"EmbySource: Browse page '{list.ParentId}' @{offset} failed — {ex.Message}");
+            return new BrowsePage();
+        }
+    }
+
+    public async Task<AlphaIndex?> GetAlphaIndexAsync(SourceCategory category, CancellationToken ct = default)
+    {
+        EnsureClient();
+        var client = _client;
+        if (client is null || !TryGetLibraryList(category, out var list)) return null;
+
+        try
+        {
+            return await BuildAlphaIndexAsync(
+                before => client.CountBeforeAsync(list.ParentId, list.IncludeTypes, list.Recursive, list.Artists, before, ct), ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _host?.Log(LogLevel.Warning, $"EmbySource: alpha index '{list.ParentId}' failed — {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Builds the letter index from "how many items sort before X" counts: the offset of letter X is the
+    /// number of items whose SortName is less than X, so each bucket's start offset is directly usable as
+    /// a StartIndex. Non-letter titles (digits, symbols) fall into "#".
+    /// </summary>
+    private static async Task<AlphaIndex?> BuildAlphaIndexAsync(
+        Func<string?, Task<int>> countBefore, CancellationToken ct)
+    {
+        int total = await countBefore(null);   // sequential first call also settles authentication
+        if (total <= 0) return null;
+
+        var starts = new int[26];
+        using var gate = new SemaphoreSlim(6);
+        await Task.WhenAll(Enumerable.Range(0, 26).Select(async i =>
+        {
+            await gate.WaitAsync(ct);
+            try { starts[i] = await countBefore(((char)('A' + i)).ToString()); }
+            finally { gate.Release(); }
+        }));
+
+        // Keep offsets monotonic and in range even if the server's collation disagrees slightly.
+        for (int i = 0; i < 26; i++)
+            starts[i] = Math.Clamp(starts[i], i == 0 ? 0 : starts[i - 1], total);
+
+        var entries = new List<AlphaIndexEntry>();
+        if (starts[0] > 0) entries.Add(new AlphaIndexEntry("#", 0, starts[0]));
+        for (int i = 0; i < 26; i++)
+        {
+            int end = i < 25 ? starts[i + 1] : total;
+            if (end > starts[i])
+                entries.Add(new AlphaIndexEntry(((char)('A' + i)).ToString(), starts[i], end - starts[i]));
+        }
+        return new AlphaIndex { Entries = entries };
+    }
+
+    /// <summary>Maps a paged-list entry: artists and folders become drill-in container leaves (the
+    /// paged path yields items only), everything else a playable leaf.</summary>
+    private SourceItem ToPagedItem(EmbyItem it, EmbyListSpec list)
+    {
+        if (list.Artists) return ToContainerItem(it, "music", EmbyMusicLevel.Artist);
+        return it.IsFolder ? ToContainerItem(it, list.CollectionType) : ToItem(it);
+    }
+
+    private SourceItem ToContainerItem(EmbyItem it, string? collectionType, EmbyMusicLevel level = EmbyMusicLevel.None) => new()
+    {
+        SourceInstanceId = InstanceId,
+        ItemId = it.Id,
+        Title = it.Name,
+        ThumbnailUrl = _client?.GetBestImageUrl(it),
+        IsContainer = true,
+        SourceState = new EmbyState(it.Id, IsAudioOnly: false, collectionType, level),
     };
 
     private SourceItem ToItem(EmbyItem it)

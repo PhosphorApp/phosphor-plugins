@@ -26,7 +26,7 @@ internal sealed record JellyfinLiveRef(string ChannelId);
 /// essential on pinball cabs where surround channels drive mechanical/ball exciters.
 /// </summary>
 public sealed class JellyfinSource :
-    IPhosphorSource, IBrowsable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IConfigurable,
+    IPhosphorSource, IBrowsable, IPagedBrowsable, IAlphaIndexable, ITextSearchCapable, IPlayableResolver, IConnectionTestable, IConfigurable,
     IFavoritable, IFavoriteCapture, IPlaybackStoppable, IPlaybackReportable, IPlaybackSuccessReportable
 {
     private JellyfinClient? _client;
@@ -212,6 +212,7 @@ public sealed class JellyfinSource :
                 Icon = IconFor(v.CollectionType),
                 ThumbnailUrl = _client.GetImageUrl(v.Id, v.ImageTag),
                 HasSubCategories = true,
+                IsTitleSorted = !isLiveTv,
                 SourceState = new JellyfinState(v.Id, IsAudioOnly: false),
             };
         }
@@ -238,6 +239,11 @@ public sealed class JellyfinSource :
         // Live TV view → list channels as playable live leaves (not generic folder items).
         if (await IsLiveTvViewAsync(parentId, ct))
             return await BrowseLiveTvAsync(ct);
+
+        // Library roots are served through the paged path (BrowsePageAsync) so large libraries
+        // lazy-load and the letter jump bar can seek; BrowseAsync returns nothing for them.
+        if (_selectedLibraryIds.Contains(parentId))
+            return new BrowseResult();
 
         JellyfinPage page;
         try
@@ -469,6 +475,101 @@ public sealed class JellyfinSource :
         Title = it.Name,
         ThumbnailUrl = _client?.GetBestImageUrl(it),
         HasSubCategories = true,
+        SourceState = new JellyfinState(it.Id, IsAudioOnly: false),
+    };
+
+    // ── IPagedBrowsable / IAlphaIndexable ────────────────────────────────────────
+
+    /// <summary>True for a library root that is browsed as a flat, SortName-ordered paged list
+    /// (everything except the Live TV channel lineup).</summary>
+    private async Task<bool> IsPagedLibraryAsync(string parentId, CancellationToken ct)
+        => _selectedLibraryIds.Contains(parentId) && !await IsLiveTvViewAsync(parentId, ct);
+
+    public async Task<BrowsePage> BrowsePageAsync(
+        SourceCategory category, int offset, int count, CancellationToken ct = default)
+    {
+        EnsureClient();
+        if (_client is null) return new BrowsePage();
+
+        var parentId = (category.SourceState as JellyfinState)?.ItemId ?? category.CategoryId;
+        if (!await IsPagedLibraryAsync(parentId, ct)) return new BrowsePage();
+
+        try
+        {
+            var page = await _client.GetItemsAsync(parentId, startIndex: offset, limit: count, ct: ct);
+            var items = page.Items.Select(it => it.IsFolder ? ToContainerItem(it) : ToItem(it)).ToList();
+            return new BrowsePage { Items = items, TotalSize = page.TotalCount };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _host?.Log(LogLevel.Warning, $"JellyfinSource: Browse page '{parentId}' @{offset} failed — {ex.Message}");
+            return new BrowsePage();
+        }
+    }
+
+    public async Task<AlphaIndex?> GetAlphaIndexAsync(SourceCategory category, CancellationToken ct = default)
+    {
+        EnsureClient();
+        var client = _client;
+        if (client is null) return null;
+
+        var parentId = (category.SourceState as JellyfinState)?.ItemId ?? category.CategoryId;
+        if (!await IsPagedLibraryAsync(parentId, ct)) return null;
+
+        try
+        {
+            return await BuildAlphaIndexAsync(before => client.CountChildrenBeforeAsync(parentId, before, ct), ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _host?.Log(LogLevel.Warning, $"JellyfinSource: alpha index '{parentId}' failed — {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Builds the letter index from "how many items sort before X" counts: the offset of letter X is the
+    /// number of items whose SortName is less than X, so each bucket's start offset is directly usable as
+    /// a StartIndex. Non-letter titles (digits, symbols) fall into "#".
+    /// </summary>
+    private static async Task<AlphaIndex?> BuildAlphaIndexAsync(
+        Func<string?, Task<int>> countBefore, CancellationToken ct)
+    {
+        int total = await countBefore(null);   // sequential first call also settles authentication
+        if (total <= 0) return null;
+
+        var starts = new int[26];
+        using var gate = new SemaphoreSlim(6);
+        await Task.WhenAll(Enumerable.Range(0, 26).Select(async i =>
+        {
+            await gate.WaitAsync(ct);
+            try { starts[i] = await countBefore(((char)('A' + i)).ToString()); }
+            finally { gate.Release(); }
+        }));
+
+        // Keep offsets monotonic and in range even if the server's collation disagrees slightly.
+        for (int i = 0; i < 26; i++)
+            starts[i] = Math.Clamp(starts[i], i == 0 ? 0 : starts[i - 1], total);
+
+        var entries = new List<AlphaIndexEntry>();
+        if (starts[0] > 0) entries.Add(new AlphaIndexEntry("#", 0, starts[0]));
+        for (int i = 0; i < 26; i++)
+        {
+            int end = i < 25 ? starts[i + 1] : total;
+            if (end > starts[i])
+                entries.Add(new AlphaIndexEntry(((char)('A' + i)).ToString(), starts[i], end - starts[i]));
+        }
+        return new AlphaIndex { Entries = entries };
+    }
+
+    /// <summary>Maps a folder item to a drill-in container leaf (the paged path yields items only).</summary>
+    private SourceItem ToContainerItem(JellyfinItem it) => new()
+    {
+        SourceInstanceId = InstanceId,
+        ItemId = it.Id,
+        Title = it.Name,
+        ThumbnailUrl = _client?.GetBestImageUrl(it),
+        IsContainer = true,
         SourceState = new JellyfinState(it.Id, IsAudioOnly: false),
     };
 
